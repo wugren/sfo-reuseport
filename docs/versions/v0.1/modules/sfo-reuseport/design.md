@@ -4,7 +4,7 @@ submodule:
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-05-26T08:09:05Z
+approved_at: 2026-05-26T15:09:01Z
 ---
 
 # sfo-reuseport 设计
@@ -23,6 +23,7 @@ approved_at: 2026-05-26T08:09:05Z
 - 定义 `ServiceConfig` 的 socket 创建后初始化回调；该回调默认不存在，在底层 socket 创建后、内部 socket 选项和 bind/listen 前同步执行。
 - 定义 `ServerRuntime` 运行期抽象、动态 listener 注册/删除接口，并允许一个 runtime 实例在同一 worker 线程集合中同时承载 TCP 与 UDP listener。
 - 定义 `QuicServer` 作为 QUIC-aware UDP 包分配入口；该入口只解析足够的 QUIC header 路由字段来选择 worker，不实现 TLS、handshake、connection 或 stream。
+- 定义一个 `examples/hyper_static.rs` 示例，用 hyper 在 `TcpServer` 回调中处理 HTTP 静态文件请求，并允许通过命令行参数设置静态文件根目录和监听地址。
 
 ### 非目标
 - 不实现协议解析、TLS、连接池、限流、超时、重试或跨 worker 通信。
@@ -31,9 +32,10 @@ approved_at: 2026-05-26T08:09:05Z
 - 不在设计阶段修改测试策略、测试计划或实现代码。
 - 不提供配置文件热加载、外部配置订阅或按协议独立线程池。
 - 不把 `QuicServer` 设计成完整 QUIC 协议栈，不引入 quinn、TLS 配置、QUIC connection/stream API 或应用协议处理。
+- 不把 hyper 静态文件能力提升为 library API；示例不提供生产级缓存、压缩、range 请求、目录浏览、TLS 或完整 MIME 数据库。
 
 ## 总体方案
-`sfo-reuseport` 公开一个小型 builder/config API。调用方创建 `ServerRuntime`，由 runtime 初始化共享 worker 数，再在运行期间增加、删除 TCP/UDP listener。单协议 TCP/UDP/QUIC-aware UDP 入口必须显式借用调用方创建的 `ServerRuntime`，公开 API 中每个 server 类型只保留一个 `serve(&ServerRuntime, ServiceConfig, handler)` 方法，不再提供无 runtime 参数的默认启动入口或 `serve_with_runtime` 并列入口。crate 在内部完成 socket 创建、平台能力适配、worker 启动和事件循环运行。
+`sfo-reuseport` 公开一个小型 builder/config API。调用方创建 `ServerRuntime`，由 runtime 初始化共享 worker 数，再在运行期间增加、删除 TCP/UDP listener。单协议 TCP/UDP/QUIC-aware UDP 入口必须显式借用调用方创建的 `ServerRuntime`，公开 API 中每个 server 类型只保留一个同步 `serve(&ServerRuntime, ServiceConfig, handler)` 方法，不再提供无 runtime 参数的默认启动入口或 `serve_with_runtime` 并列入口。`serve` 完成 socket bind、listener 注册和 worker loop 提交后返回 `Result<(), Error>`，不在方法内部 await `pending` 或其他永不完成的 lifecycle future；服务生命周期由 `ServerRuntime` 和 listener registry 持有。
 
 `QuicServer` 复用 UDP bind、worker runtime 和 runtime 原生 `UdpSocket` 回调形态，但使用固定的 QUIC-aware worker 选择规则替代普通 UDP worker 选择：从 UDP payload 中读取 QUIC Destination Connection ID 的前 2 字节 big-endian `u16` worker shard，并把 packet 投递到对应 worker。这个设计只处理 UDP 包分配；QUIC 协议状态仍由调用方或上层 QUIC crate 管理。
 
@@ -44,6 +46,8 @@ approved_at: 2026-05-26T08:09:05Z
 3. `platform`：平台具体实现，负责 bind 前 socket 创建、reuse-port/reuse-address/transparent 等选项设置，以及 Windows 或其他 fallback 用户态模拟所需的收包适配。
 
 公开 API 不暴露上述内部层级。公开类型保留在 crate 根或 `api` 模块中，再 re-export 给调用方；内部模块负责降低实现耦合。
+
+`examples/hyper_static.rs` 是 consumer 示例，不进入 crate 公开 API。示例创建 `ServerRuntime`，通过 `TcpServer::serve(&runtime, config, handler)` 接收 runtime 原生 `TcpStream`，再使用 hyper 的 HTTP/1 connection 服务处理请求。示例参数支持 `--root <path>` 和 `--addr <socket-addr>`；未提供时 `--root` 默认当前目录，`--addr` 默认 `127.0.0.1:8080`。请求路径按 URL path segment 逐段解析并拒绝 `..`、Windows prefix/root、空 NUL 等逃逸静态根目录的输入；目录请求尝试追加 `index.html`；普通文件返回 `200`，缺失路径返回 `404`，非法路径返回 `403`。
 
 ## 简化检查
 - 最小充分方案：使用 feature-gated runtime 模块、一个共享 core 层和 cfg-gated platform 层，不引入插件系统或动态分发平台后端；tokio-uring 作为第三个互斥 runtime adapter，而不是新增一套 public server API。
@@ -62,12 +66,14 @@ approved_at: 2026-05-26T08:09:05Z
   - socket 初始化回调是 `CHG-socket-init-callback` 的直接公开契约；使用一次性闭包比为每个底层选项新增稳定字段更小，同时仍避免长期 raw socket escape hatch。
   - `ServerRuntime`/listener registry 是运行期增删监听和混合协议共享 worker 配置的直接需求。
   - `QuicServer` 是 `CHG-quic-routed-udp` 的直接公开契约；独立类型可以清楚表达 QUIC-aware UDP routing，同时保持 `UdpServer` 的裸 UDP 包交付模型不变。
+  - hyper 静态文件服务器只作为示例 binary 存在；直接在示例内实现少量参数解析和路径解析即可，不为 crate 增加 HTTP 抽象。
 
 ## 当前结构
 - `Cargo.toml` 声明 library crate、runtime features 和实现依赖。
 - `src/lib.rs` 是公开 library 入口。
 - `src/core/`、`src/runtime/` 和 `src/platform/` 分别承载领域逻辑、async runtime 适配和平台 socket 行为。
 - `examples/tcp_echo.rs` 是示例 binary，必须使用 `ServerRuntimeConfig` 配置 worker。
+- `examples/hyper_static.rs` 是新增示例 binary，必须使用 `ServerRuntime` 和 `TcpServer`，并把 HTTP/静态文件逻辑限制在示例内。
 
 ## 模块拆分
 这些是 crate 内部 Rust 模块，不是 Harness 直接子模块包。
@@ -91,18 +97,19 @@ approved_at: 2026-05-26T08:09:05Z
 |-----------|-------------|-----------------|-------------|---------------------------|-------|
 | CHG-runtime-features | P-runtime | `Cargo.toml` features、`runtime` 模块、互斥 compile_error、runtime 原生类型别名。 | `Cargo.toml`、`src/runtime.rs` 或 `src/runtime/`、`src/lib.rs` | 公开回调类型随 feature 变化。 | 默认 `runtime-tokio`。 |
 | CHG-tokio-uring-runtime | P-tokio-uring-runtime | 新增 `runtime-tokio-uring` feature、`tokio-uring` 可选依赖、Linux-only cfg 边界、`src/runtime/tokio_uring.rs` adapter、公开 `TcpStream`/`UdpSocket` 类型映射到 tokio-uring net 类型或共享等价包装、标准 socket 转换入口和每 worker current-thread tokio-uring driver 启动方式。 | `Cargo.toml`、`src/lib.rs`、`src/runtime/mod.rs`、`src/runtime/tokio_uring.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`examples/` | 第三个互斥 runtime feature；启用后用户 handler 可直接调用 tokio-uring socket API；非 Linux 平台编译期拒绝或明确 unsupported。 | 不新增 server API；不允许与 tokio/async-std 同时启用；tokio-uring 非 Linux 可运行支持不属于 v0.1 承诺。 |
-| CHG-server-runtime | P-server-runtime | `ServerRuntimeConfig` 持有共享 worker 数，`ServerRuntime` 持有 listener registry 和注册入口，server/listener config 不含 worker 数量或调度策略；`TcpServer`、`UdpServer`、`QuicServer` 单协议入口只接受显式 `&ServerRuntime`。 | `src/core/config.rs`、`src/core/server_runtime.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/lib.rs` | 公开动态服务入口命名为 `ServerRuntime`；worker 配置从 server/listener config 移到 runtime config；移除无 runtime 参数 `serve` 和 `serve_with_runtime`。 | 不提供每 server 独立 worker 池或隐式默认 runtime 入口。 |
+| CHG-server-runtime | P-server-runtime | `ServerRuntimeConfig` 持有共享 worker 数，`ServerRuntime` 持有 listener registry 和注册入口，server/listener config 不含 worker 数量或调度策略；`TcpServer`、`UdpServer`、`QuicServer` 单协议入口只接受显式 `&ServerRuntime`，并作为同步 listener 注册方法返回。 | `src/core/config.rs`、`src/core/server_runtime.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/lib.rs` | 公开动态服务入口命名为 `ServerRuntime`；worker 配置从 server/listener config 移到 runtime config；移除无 runtime 参数 `serve` 和 `serve_with_runtime`；`serve` 返回值不是 future。 | 不提供每 server 独立 worker 池或隐式默认 runtime 入口；不让 `serve` 通过 `pending` 挂起。 |
 | CHG-worker-thread-runtime | P-worker-thread-runtime | `runtime` 模块提供 worker thread 启动入口；每个 worker loop 在独立 OS 线程中初始化并运行单线程 async runtime。 | `src/runtime/`、`src/core/worker.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/core/dynamic.rs` | worker loop 不再直接依赖调用方当前 runtime 的 `spawn` 代表 worker。 | 不提供 work stealing 或多线程 per-worker runtime。 |
 | CHG-worker-model | P-workers | `ServerRuntimeConfig` worker 数量、默认 CPU 数、worker spawn/join、内部 worker id。 | `src/core/worker.rs` | 回调不包含 worker id。 | worker id 仅用于日志/分发内部状态。 |
-| CHG-tcp-serve | P-tcp | `TcpServer::serve(&ServerRuntime, ServiceConfig, handler)` 创建 TCP listener、运行 accept loop、每连接 async 回调。 | `src/core/tcp.rs`、`src/platform/` | TCP serve API 只通过显式 runtime 入口暴露。 | 回调接收 runtime 原生 `TcpStream`；不保留 `serve_with_runtime`。 |
-| CHG-udp-runtime-socket | P-udp | `UdpServer::serve(&ServerRuntime, ServiceConfig, handler)` 运行 UDP recv loop、交付 packet metadata，并把当前 runtime 的原生 `UdpSocket` 交给 handler；不导出 `BalancedUdpSocket`。 | `src/core/udp.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | UDP serve API 只通过显式 runtime 入口暴露，UDP handler 与 runtime feature 选择绑定。 | 不保留 `BalancedUdpSocket` 或 `serve_with_runtime`；实现仍负责保护内部 bind/reuse-port 状态不被配置覆盖。 |
+| CHG-tcp-serve | P-tcp | 同步 `TcpServer::serve(&ServerRuntime, ServiceConfig, handler)` 创建 TCP listener、提交 accept loop、每连接 async 回调；注册完成后立即返回启动结果。 | `src/core/tcp.rs`、`src/platform/` | TCP serve API 只通过显式 runtime 入口暴露，且调用方不需要 `.await` 才能完成启动。 | 回调接收 runtime 原生 `TcpStream`；不保留 `serve_with_runtime`；不在 `serve` 内部使用 `pending`。 |
+| CHG-udp-runtime-socket | P-udp | 同步 `UdpServer::serve(&ServerRuntime, ServiceConfig, handler)` 提交 UDP recv loop、交付 packet metadata，并把当前 runtime 的原生 `UdpSocket` 交给 handler；不导出 `BalancedUdpSocket`；注册完成后立即返回启动结果。 | `src/core/udp.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | UDP serve API 只通过显式 runtime 入口暴露，UDP handler 与 runtime feature 选择绑定，且调用方不需要 `.await` 才能完成启动。 | 不保留 `BalancedUdpSocket` 或 `serve_with_runtime`；实现仍负责保护内部 bind/reuse-port 状态不被配置覆盖；不在 `serve` 内部使用 `pending`。 |
 | CHG-linux-compatible-scheduling | P-linux-compatible-scheduling | 删除公开 `DispatchPolicy` 和 dispatcher 配置；`ServerRuntimeConfig` 不包含调度字段；fallback 用户态路径使用内部 Linux 兼容 hash 选择 worker；`QuicServer` 继续使用固定 16-bit shard 规则。 | `src/core/config.rs`、`src/core/schedule.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/core/mod.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | 公开 API 不导出 Dispatcher/DispatchPolicy，不提供 `Auto`、`RoundRobin`、`SrcHash`、`Custom` 或自定义 selector；平台 fallback 行为保持内部实现细节。 | 不提供可配置、load-aware、adaptive 或用户自定义 scheduler。 |
 | CHG-platform-behavior | P-platform | `PlatformSocketOps` trait 和 cfg-gated Linux/BSD/Windows 实现。 | `src/platform/` | 平台差异不进入公开 API。 | Windows 走用户态模拟。 |
 | CHG-socket-options | P-socket-options | `SocketOptions`、能力检查、设置时机和错误分类。 | `src/core/config.rs`、`src/platform/` | 配置层新增受控 socket 选项。 | 不允许覆盖内部 reuse-port/bind 状态。 |
 | CHG-socket-init-callback | P-socket-init-callback | `ServiceConfig` 持有默认 `None` 的 socket 创建后回调；平台层创建 `socket2::Socket` 后、内部选项和 bind/listen 前调用；回调错误转换为 `Error::SocketInitCallback` 并阻止服务启动。 | `src/core/config.rs`、`src/core/error.rs`、`src/platform/`、`src/core/tcp.rs`、`src/core/udp.rs` | 公开配置层新增一次性初始化钩子；不暴露 socket 所有权，不允许回调返回后继续持有可变访问权。 | 回调接收借用的 `socket2::Socket`，可调用 socket2 支持的 setter；跨平台可用性由调用方和底层 OS 负责。 |
 | CHG-dynamic-listeners | P-dynamic-listeners | `ServerRuntime`、`ListenerId`、listener registry、运行期 TCP/UDP bind/unbind、删除唤醒和停止新工作交付。 | `src/core/config.rs`、`src/core/dynamic.rs`、`src/core/tcp.rs`、`src/core/udp.rs` | 新增动态 listener 管理 API，不改变既有单协议入口。 | 删除 listener 不强制中断已交付 handler future。 |
 | CHG-mixed-protocol-workers | P-mixed-protocol-workers | TCP/UDP listener 注册到同一 `ServerRuntime` 实例并在同一 runtime executor 上运行。 | `src/core/dynamic.rs`、`src/runtime/` | 新增混合协议 runtime 入口。 | 不提供按协议独立线程池或负载感知调度。 |
-| CHG-quic-routed-udp | P-quic-routed-udp | `QuicServer::serve(&ServerRuntime, ServiceConfig, handler)`、固定 QUIC DCID 前 2 字节 big-endian `u16` worker shard 解析、非法 packet 丢弃、Linux reuse-port eBPF selector 的 best-effort worker 预分配、CBPF fallback、用户态稳定 worker 投递 fallback 和 listener 删除语义。 | `src/core/udp.rs`、`src/core/mod.rs`、`src/lib.rs`、`src/platform/`、`tests/unit/`、`tests/dv/`、`tests/integration/` | 新增 QUIC-aware UDP routing API；不改变 `UdpServer` 裸 UDP API；`QuicServer` 也只通过显式 runtime `serve` 暴露；Linux 可用时优先尝试内核 reuse-port eBPF 预分配，eBPF 加载或 attach 失败时退回 CBPF，再失败时退回用户态路由；外部使用者必须按固定 CID layout 生成 server CID。 | 不实现 TLS、handshake、connection、stream、congestion control 或 quinn 集成；不支持可配置 CID layout；不把 eBPF/CBPF 加载失败暴露为公开 API 或强制启动失败；不保留 `serve_with_runtime`。 |
+| CHG-quic-routed-udp | P-quic-routed-udp | 同步 `QuicServer::serve(&ServerRuntime, ServiceConfig, handler)`、固定 QUIC DCID 前 2 字节 big-endian `u16` worker shard 解析、非法 packet 丢弃、Linux reuse-port eBPF selector 的 best-effort worker 预分配、CBPF fallback、用户态稳定 worker 投递 fallback 和 listener 删除语义；注册完成后立即返回启动结果。 | `src/core/udp.rs`、`src/core/mod.rs`、`src/lib.rs`、`src/platform/`、`tests/unit/`、`tests/dv/`、`tests/integration/` | 新增 QUIC-aware UDP routing API；不改变 `UdpServer` 裸 UDP API；`QuicServer` 也只通过显式 runtime 同步 `serve` 暴露；Linux 可用时优先尝试内核 reuse-port eBPF 预分配，eBPF 加载或 attach 失败时退回 CBPF，再失败时退回用户态路由；外部使用者必须按固定 CID layout 生成 server CID。 | 不实现 TLS、handshake、connection、stream、congestion control 或 quinn 集成；不支持可配置 CID layout；不把 eBPF/CBPF 加载失败暴露为公开 API 或强制启动失败；不保留 `serve_with_runtime`；不在 `serve` 内部使用 `pending`。 |
+| CHG-hyper-static-example | P-hyper-static-example | `examples/hyper_static.rs` 使用 hyper HTTP/1 connection API 包装 `TcpServer` 交付的 TCP stream；示例解析 `--root <path>` 和 `--addr <socket-addr>`，将 URL path 映射到静态根目录内文件，目录请求尝试 `index.html`，非法路径拒绝，缺失文件返回 404。 | `Cargo.toml`、`examples/hyper_static.rs`、`tests/` 或 harness 可达的示例验证 | 新增示例 binary 和 example-only 依赖；不改变 `src/` 公开 API。 | 依赖允许使用 `hyper`、`hyper-util`、`http-body-util` 和 `bytes`；参数解析用标准库，避免新增 CLI 依赖。 |
 
 ## 实施顺序
 | 阶段 | 目标 | 前置条件 | 输出 | 依赖 | 可并行 |
@@ -116,6 +123,7 @@ approved_at: 2026-05-26T08:09:05Z
 | 7 | 实现 `ServerRuntime`、动态 listener registry 和混合协议服务入口。 | 阶段 1-6 | `ServerRuntime`、listener add/remove、混合 TCP/UDP 验证。 | tcp、udp、worker、runtime | no |
 | 8 | 实现 `QuicServer` QUIC-aware UDP 包路由入口。 | 阶段 1-7 | `QuicServer`、QUIC DCID worker shard 解析、跨 worker 稳定投递验证。 | udp、worker、runtime | no |
 | 9 | 增加 tokio-uring runtime adapter。 | 阶段 1-8，`CHG-tokio-uring-runtime` admission 通过。 | `runtime-tokio-uring` feature、tokio-uring socket 类型映射、Linux cfg 编译边界和 handler API 验证。 | runtime、tcp、udp、platform | no |
+| 10 | 增加 hyper 静态文件服务器示例。 | `CHG-hyper-static-example` admission 通过，`TcpServer` 与 `ServerRuntime` 可用。 | `examples/hyper_static.rs`、必要 example 依赖和示例验证。 | tcp、runtime、Cargo example deps | no |
 
 ## 关键决策
 - 使用 compile-time feature 选择 runtime，而不是 runtime trait object。原因是公开回调必须包含当前 runtime 的原生 `TcpStream`/UDP socket 类型，动态抽象会迫使 API 失去原生类型。
@@ -131,6 +139,7 @@ approved_at: 2026-05-26T08:09:05Z
 - `QuicServer` 使用固定 worker shard 规则：long header packet 读取 DCID length 后取 DCID 前 2 字节作为 big-endian `u16` worker shard；short header packet 取首字节之后的 2 字节作为 big-endian `u16` worker shard。worker index 为 `shard % worker_count`。payload 太短、DCID length 小于 2 或 DCID 超出 payload 边界时丢弃该 packet，不调用用户 handler。
 - 强约束由固定公开契约和运行时拒绝共同形成：上层 QUIC crate 必须在 server CID 的 DCID 前 2 字节写入 big-endian worker shard；`QuicServer` 不提供可配置 layout、fallback 推断或来源地址兜底，所有不满足 layout 的 packet 都不会进入用户 handler。
 - `QuicServer` v0.1 在 Linux 上先尝试 best-effort reuse-port eBPF selector：为每个 worker 创建绑定到同一地址的 UDP socket，加载 `BPF_PROG_TYPE_SK_REUSEPORT` 程序并通过 `SO_ATTACH_REUSEPORT_EBPF` 附加到 reuse-port group。eBPF 程序只读取 QUIC 固定 shard layout 并返回 `shard % worker_count`，让内核优先把合法 packet 送到目标 worker socket。eBPF 加载、verifier、权限或 attach 失败时不改变公开 API，继续尝试当前 classic BPF selector；CBPF 也失败、平台不支持或 socket 组创建失败时退回可移植用户态稳定分发路径。worker loop 仍在用户态解析 route key；非法 packet、BPF fallback packet 或未进入目标 worker 的 packet 不调用 handler。
+- hyper 静态文件服务器示例使用标准库解析命令行，避免新增 CLI 依赖。路径解析基于 URL path segment，不对请求路径做字符串拼接；示例只从静态根目录读取普通文件或目录下的 `index.html`。Content-Type 可以用少量扩展名映射提供常见值，未知扩展名使用 `application/octet-stream`。
 
 ## 数据与状态
 ### 配置类型
@@ -196,7 +205,7 @@ TCP 入口：
 pub struct TcpServer;
 
 impl TcpServer {
-    pub async fn serve<F, Fut>(
+    pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
         config: ServiceConfig,
         handler: F,
@@ -213,7 +222,7 @@ UDP 入口：
 pub struct UdpServer;
 
 impl UdpServer {
-    pub async fn serve<F, Fut>(
+    pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
         config: ServiceConfig,
         handler: F,
@@ -230,7 +239,7 @@ QUIC-aware UDP 包分配入口：
 pub struct QuicServer;
 
 impl QuicServer {
-    pub async fn serve<F, Fut>(
+    pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
         config: ServiceConfig,
         handler: F,
@@ -241,7 +250,7 @@ impl QuicServer {
 }
 ```
 
-`TcpServer`、`UdpServer` 和 `QuicServer` 的 `serve` 都借用已启动的 `ServerRuntime`。这三个类型不再创建自己的默认 runtime，不接受 `ServerRuntimeConfig`，也不提供 `serve_with_runtime`。`UdpServer` 和 `QuicServer` 的 handler 接收 UDP packet 级别参数和所选 runtime 的原生 `UdpSocket`，便于用户直接使用 runtime UDP API 发送响应；公开 API 不导出 `BalancedUdpSocket`。`QuicServer` 不暴露 TLS、ALPN、QUIC transport config、connection 或 stream API。上层必须生成满足 `DCID[0..2] = worker_shard_be_u16` 的 CID；不满足该 layout 的 packet 被视为不可路由。
+`TcpServer`、`UdpServer` 和 `QuicServer` 的 `serve` 都借用已启动的 `ServerRuntime`，并且都是同步方法。它们完成配置校验、socket bind、listener registry 注册和 worker task 提交后立即返回 `Result<(), Error>`；listener loop 在 `ServerRuntime` worker thread runtime 内继续运行，`serve` 内部不得调用 `std::future::pending` 或等价永不完成 future 来占住调用方。内核或 worker loop 中的后续异步错误按 listener loop 停止处理，不把 `serve` 转换为 lifecycle future。这三个类型不再创建自己的默认 runtime，不接受 `ServerRuntimeConfig`，也不提供 `serve_with_runtime`。`UdpServer` 和 `QuicServer` 的 handler 接收 UDP packet 级别参数和所选 runtime 的原生 `UdpSocket`，便于用户直接使用 runtime UDP API 发送响应；公开 API 不导出 `BalancedUdpSocket`。`QuicServer` 不暴露 TLS、ALPN、QUIC transport config、connection 或 stream API。上层必须生成满足 `DCID[0..2] = worker_shard_be_u16` 的 CID；不满足该 layout 的 packet 被视为不可路由。
 
 Linux QUIC reuse-port selector 内部接口：
 
@@ -333,6 +342,9 @@ pub(crate) trait PlatformSocketOps {
 - `tokio-uring`：仅在 `runtime-tokio-uring` feature 下启用，目标平台必须是 Linux；worker thread 创建并持有 `tokio_uring::Runtime` 作为 current-thread io_uring driver。标准 TCP/UDP socket 转换入口必须先设置 nonblocking 或采用 tokio-uring 支持的 from-std 路径；若 tokio-uring 无法接管已绑定 socket，implementation 必须在 adapter 或 platform 层调整创建顺序，但不得改变公开 server API。
 - `socket2`：用于 bind 前创建 socket 和设置 reuse-address/reuse-port/transparent 等选项。
 - `num_cpus`：用于默认 worker 数。
+- `hyper`：仅作为 `examples/hyper_static.rs` 示例依赖，用于 HTTP/1 server connection 和 request/response 类型。
+- `hyper-util`：仅作为示例依赖，用于把 runtime TCP stream 适配为 hyper IO。
+- `http-body-util` 和 `bytes`：仅作为示例依赖，用于构造固定响应 body。
 - 新依赖只在实现阶段按此设计加入；若发现需要额外依赖，必须先更新 design。
 - `socket2` 已是平台 socket 设置依赖；公开回调类型可以引用 `socket2::Socket`，不需要新增依赖。
 
@@ -363,7 +375,8 @@ sfo-reuseport
 │       ├── bsd.rs
 │       └── windows.rs
 ├── examples/
-│   └── tcp_echo.rs
+│   ├── tcp_echo.rs
+│   └── hyper_static.rs
 ├── docs/
 └── harness/
 ```
@@ -375,6 +388,7 @@ sfo-reuseport
 | `src/core/` | Rust module | 共用业务逻辑、worker、TCP/UDP、动态 listener、Linux 兼容内部调度和错误 | 无平台 syscall |
 | `src/platform/` | Rust module | 平台 socket 行为 | cfg-gated |
 | `examples/tcp_echo.rs` | Rust example | 示例 TCP echo server | 使用 `ServerRuntimeConfig` 配置 worker |
+| `examples/hyper_static.rs` | Rust example | hyper HTTP 静态文件服务器示例 | 参数支持 `--root <path>` 和 `--addr <socket-addr>`，不改变 library API |
 
 ## 文档索引
 | 文档 | 主题 | 范围 |
@@ -396,6 +410,7 @@ sfo-reuseport
 - 混合协议共享 runtime 风险：handler future 必须 `Send + 'static`；若某协议 handler 长时间占用 runtime 线程，调用方需要自行控制 handler 行为，v0.1 不实现负载感知调度。
 - `QuicServer` 命名风险：公开文档和测试必须证明它只提供 QUIC-aware UDP routing，不提供完整 QUIC server。回滚时可移除 `QuicServer` re-export 和入口，不影响 `UdpServer`。
 - QUIC 路由键解析风险：来自网络的 packet 必须做长度检查，非法、缺失或短于 16-bit worker shard 的路由键时丢弃，不得 panic 或调用 handler。eBPF/CBPF selector 仅作为 Linux 内核预分配优化；用户态 worker loop 仍保留 route key 校验，确保 verifier、权限或 selector attach 差异不会改变非法 packet 丢弃语义。
+- 静态文件示例路径逃逸风险：示例必须拒绝 `..`、绝对路径、Windows prefix/root 和 NUL 输入，并在最终 canonicalize 后确认目标路径仍位于静态根目录内。回滚时可删除 `examples/hyper_static.rs` 和对应 example 依赖，不影响 library crate。
 
 ## 下游跟进
 | follow_up_id | 归属阶段 | 原因 | 触发设计项 | 阻塞 |
@@ -411,6 +426,8 @@ sfo-reuseport
 | FU-DESIGN-010 | testing | 为 `CHG-linux-compatible-scheduling` 增加验证，覆盖 Dispatcher/DispatchPolicy 不公开、`ServerRuntimeConfig` 不含调度字段，以及 fallback 用户态路径使用 Linux 兼容内部调度。 | Linux 兼容内部调度 | yes |
 | FU-DESIGN-011 | implementation | 在 `CHG-tokio-uring-runtime` admission 通过后，新增 `runtime-tokio-uring` feature、tokio-uring adapter、Linux cfg 编译边界和公开 socket 类型映射。 | tokio-uring runtime adapter | yes |
 | FU-DESIGN-012 | testing | 为 `CHG-tokio-uring-runtime` 增加验证，覆盖 feature 互斥、非 Linux cfg 边界、公开 socket 类型、handler 调用 tokio-uring API 和 unified harness 可达性。 | tokio-uring runtime adapter | yes |
+| FU-DESIGN-013 | implementation | 在 `CHG-hyper-static-example` admission 通过后，新增 hyper 静态文件服务器示例和必要 example 依赖。 | hyper static example | yes |
+| FU-DESIGN-014 | testing | 为 `CHG-hyper-static-example` 增加验证，覆盖示例编译、`--root` 参数、200/404/403 响应和 unified harness 可达性。 | hyper static example | yes |
 
 ## 设计护栏
 - 不要在 `design.md` 中改写已批准的 proposal 意图。

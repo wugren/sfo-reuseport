@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer};
+use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer};
 
 fn free_addr() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -27,8 +27,8 @@ async fn tcp_loopback_serve_accepts_multiple_connections_without_exiting() {
                     Ok(())
                 }
             },
-        )
-        .await
+        )?;
+        std::future::pending::<Result<(), Error>>().await
     });
 
     for _ in 0..2 {

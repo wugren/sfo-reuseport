@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sfo_reuseport::{
-    ListenerConfig, QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig,
+    Error, ListenerConfig, QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig,
 };
 
 fn free_addr() -> std::net::SocketAddr {
@@ -24,8 +24,8 @@ async fn quic_server_serve_delivers_long_header_dcid_and_sends_response() {
                 socket.send_to(b"quic-ok", meta.peer_addr.unwrap()).await?;
                 Ok(())
             },
-        )
-        .await
+        )?;
+        std::future::pending::<Result<(), Error>>().await
     });
 
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

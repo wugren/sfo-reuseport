@@ -1,6 +1,6 @@
 use std::net::UdpSocket as StdUdpSocket;
 
-use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig, ServiceConfig, UdpServer};
+use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, ServiceConfig, UdpServer};
 
 fn free_addr() -> std::net::SocketAddr {
     let socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
@@ -20,8 +20,8 @@ async fn udp_loopback_serve_receives_packet_and_sends_response() {
                 _socket.send_to(b"pong", meta.peer_addr.unwrap()).await?;
                 Ok(())
             },
-        )
-        .await
+        )?;
+        std::future::pending::<Result<(), Error>>().await
     });
 
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();

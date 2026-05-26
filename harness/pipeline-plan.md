@@ -76,6 +76,11 @@
 | I-13 | implementation | complete | implement runtime-tokio-uring production support | Cargo features, runtime adapter, feature gates, examples as needed | root | D-13, admission-check passed | production code and build resources | implementation complete; default and tokio-uring cargo checks pass; stage-scope blocked by pre-existing untracked repository baseline |
 | T-13 | testing | confirmed | add tokio-uring validation coverage and testplan metadata | feature matrix, API compile contract, Linux cfg behavior | root | I-13 | tests, `testing.md`, `testplan.yaml` | testing updated and auto-confirmed; unit/dv/integration passed through harness; stage-scope blocked by pre-existing untracked repository baseline |
 | A-13 | acceptance | complete | audit tokio-uring evidence chain and implementation | tokio-uring runtime final | root | T-13 | `docs/versions/v0.1/reviews/sfo-reuseport-v0.1-tokio-uring-runtime-acceptance.md` | accepted; no blocking issues found; root shortcut blocked by missing uv; stage-scope blocked by pre-existing untracked repository baseline |
+| P-14 | proposal | confirmed | require TcpServer/UdpServer/QuicServer serve methods to be synchronous registration methods | serve API lifecycle contract | root | user auto-pipeline continuation | `proposal.md` | proposal updated and auto-confirmed; schema-check passed; stage-scope blocked by aggregate working-tree baseline |
+| D-14 | design | confirmed | synchronize public API design to synchronous serve methods with no internal pending | serve API signatures and lifecycle ownership | root | P-14 | `design.md` | design updated and auto-confirmed; schema-check passed; admission checks passed; stage-scope blocked by aggregate working-tree baseline |
+| I-14 | implementation | complete | convert TcpServer/UdpServer/QuicServer serve from async pending futures to synchronous registration methods | `src/core/tcp.rs`, `src/core/udp.rs`, examples | root | D-14, admission-check passed | production code and examples | implementation complete; production `serve` methods return `Result<(), Error>` and no longer use `pending` |
+| T-14 | testing | confirmed | update API, DV, integration, and example validation for synchronous serve | tests, `testing.md`, `testplan.yaml` | root | I-14 | tests and testing docs | testing updated and auto-confirmed; `sfo-reuseport all` and `all all` passed; stage-scope blocked by aggregate working-tree baseline |
+| A-14 | acceptance | needs changes | audit synchronous serve API evidence chain | synchronous serve final | root | T-14 | `docs/versions/v0.1/reviews/sfo-reuseport-v0.1-serve-api-acceptance.md` | behavior accepted by evidence; strict final process acceptance blocked by stage-scope aggregate baseline |
 
 ## Submodule Tasks
 | Task ID | Stage | Status | Responsibility | Submodule | Parent Task | Depends On | Output | Done Condition |
@@ -98,4 +103,5 @@
 - [x] Document-producing stages auto-confirmed by setting front matter to `status: approved`, `approved_by: auto-pipeline`, and `approved_at`
 - [x] Every implemented `change_id` has proposal/design traceability plus post-implementation testing evidence or explicit gap
 - [ ] Every single-stage task passed stage-scope-check
-- [x] Final acceptance passed against `proposal.md`
+- [x] Final behavioral acceptance passed against `proposal.md`
+- [ ] Strict final process acceptance passed without stage-scope baseline blockers

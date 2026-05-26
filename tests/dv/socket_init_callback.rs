@@ -15,7 +15,7 @@ async fn tcp_bind_invokes_socket_init_callback_and_propagates_error() {
     );
 
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
-    let result = TcpServer::serve(&runtime, config, |_stream| async { Ok(()) }).await;
+    let result = TcpServer::serve(&runtime, config, |_stream| async { Ok(()) });
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let message = result.unwrap_err().to_string();
@@ -35,7 +35,7 @@ async fn udp_bind_invokes_socket_init_callback_and_propagates_error() {
     );
 
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
-    let result = UdpServer::serve(&runtime, config, |_socket, _meta, _payload| async { Ok(()) }).await;
+    let result = UdpServer::serve(&runtime, config, |_socket, _meta, _payload| async { Ok(()) });
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let message = result.unwrap_err().to_string();

@@ -20,8 +20,8 @@ async fn main() -> Result<(), Error> {
 
     TcpServer::serve(&runtime, config, |stream| async move {
         echo_connection(stream).await
-    })
-    .await
+    })?;
+    std::future::pending::<Result<(), Error>>().await
 }
 
 #[cfg(not(feature = "runtime-tokio-uring"))]

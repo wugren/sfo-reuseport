@@ -1,7 +1,6 @@
 use sfo_reuseport::{
     ServerRuntime, ServerRuntimeConfig, ServiceConfig, SocketOptions, TransparentMode, UdpServer,
 };
-use std::time::Duration;
 
 #[tokio::test]
 async fn required_transparent_returns_explicit_error() {
@@ -13,14 +12,10 @@ async fn required_transparent_returns_explicit_error() {
     );
 
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
-    let result = tokio::time::timeout(
-        Duration::from_millis(200),
-        UdpServer::serve(&runtime, config, |_socket, _meta, _payload| async { Ok(()) }),
-    )
-    .await;
+    let result = UdpServer::serve(&runtime, config, |_socket, _meta, _payload| async { Ok(()) });
 
-    if let Ok(result) = result {
-        let message = result.unwrap_err().to_string();
+    if let Err(error) = result {
+        let message = error.to_string();
         assert!(message.contains("transparent") || message.contains("permission denied"));
     }
 }

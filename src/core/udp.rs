@@ -1,4 +1,3 @@
-use std::future::pending;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,7 +20,7 @@ pub struct PacketMeta {
 pub struct UdpServer;
 
 impl UdpServer {
-    pub async fn serve<F, Fut>(
+    pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
         config: ServiceConfig,
         handler: F,
@@ -36,7 +35,7 @@ impl UdpServer {
         } else {
             add_reuse_port_listener(runtime, config, handler)?;
         }
-        pending::<Result<(), Error>>().await
+        Ok(())
     }
 }
 
@@ -148,7 +147,7 @@ where
 pub struct QuicServer;
 
 impl QuicServer {
-    pub async fn serve<F, Fut>(
+    pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
         config: ServiceConfig,
         handler: F,
@@ -159,7 +158,7 @@ impl QuicServer {
     {
         config.validate()?;
         add_quic_routed_listener(runtime, config, handler)?;
-        pending::<Result<(), Error>>().await
+        Ok(())
     }
 }
 

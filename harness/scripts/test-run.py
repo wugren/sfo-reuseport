@@ -27,9 +27,11 @@ COMMANDS = {
         ],
         "dv": [
             ["cargo", "check"],
+            ["cargo", "check", "--example", "hyper_static"],
             ["cargo", "check", "--no-default-features", "--features", "runtime-async-std", "--lib"],
             TOKIO_URING_CHECK,
             ["cargo", "test", "--test", "dv"],
+            ["python3", "./harness/scripts/test-hyper-static-example.py"],
         ],
         "integration": [["cargo", "test", "--test", "integration"]],
     }

@@ -1,4 +1,3 @@
-use std::future::pending;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +16,7 @@ type TcpHandler = Arc<dyn Fn(TcpStream) -> HandlerFutureBox + Send + Sync>;
 pub struct TcpServer;
 
 impl TcpServer {
-    pub async fn serve<F, Fut>(
+    pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
         config: ServiceConfig,
         handler: F,
@@ -32,7 +31,7 @@ impl TcpServer {
         } else {
             add_reuse_port_listener(runtime, config, handler)?;
         }
-        pending::<Result<(), Error>>().await
+        Ok(())
     }
 }
 

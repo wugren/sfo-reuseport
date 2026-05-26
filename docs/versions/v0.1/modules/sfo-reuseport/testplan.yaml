@@ -43,7 +43,7 @@ levels:
         change_ids: ["CHG-server-runtime", "CHG-worker-model"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: explicit-runtime-serve-api
-        name: TcpServer UdpServer QuicServer 只接受显式 ServerRuntime 的 serve 入口
+        name: TcpServer UdpServer QuicServer 只接受显式 ServerRuntime 的同步 serve 入口
         change_ids: ["CHG-server-runtime", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: worker-thread-runtime
@@ -88,9 +88,11 @@ levels:
     summary: 单模块可运行验证、feature 组合编译和当前平台 cfg 检查
     test_targets:
       - Cargo.toml
+      - examples/hyper_static.rs
       - src/lib.rs
       - src/platform
       - tests/dv
+      - harness/scripts/test-hyper-static-example.py
     preconditions:
       tools: []
       env: []
@@ -121,6 +123,10 @@ levels:
       - id: socket-init-callback-dv
         name: 当前平台 TCP UDP bind 路径 socket 初始化回调
         change_ids: ["CHG-socket-init-callback"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
+      - id: hyper-static-example
+        name: hyper 静态文件服务器示例编译和 smoke 验证
+        change_ids: ["CHG-hyper-static-example"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
 
   integration:

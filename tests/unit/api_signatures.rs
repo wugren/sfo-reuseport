@@ -32,11 +32,13 @@ fn server_entrypoints_are_public() {
     let _quic = QuicServer;
     let config = ServiceConfig::new("127.0.0.1:0".parse().unwrap());
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
-    let tcp = TcpServer::serve(&runtime, config.clone(), |_stream| async { Ok(()) });
-    let udp = UdpServer::serve(&runtime, config.clone(), |_socket, _meta, _payload| async {
+    let tcp: Result<(), Error> = TcpServer::serve(&runtime, config.clone(), |_stream| async {
         Ok(())
     });
-    let quic = QuicServer::serve(&runtime, config, |_socket, _meta, _payload| async {
+    let udp: Result<(), Error> = UdpServer::serve(&runtime, config.clone(), |_socket, _meta, _payload| async {
+        Ok(())
+    });
+    let quic: Result<(), Error> = QuicServer::serve(&runtime, config, |_socket, _meta, _payload| async {
         Ok(())
     });
     drop((tcp, udp, quic));
@@ -50,6 +52,21 @@ fn legacy_server_entrypoints_are_not_public() {
     assert!(!tcp.contains("pub fn serve_on"));
     assert!(!udp.contains("pub async fn serve_with_runtime"));
     assert!(!udp.contains("pub fn serve_on"));
+}
+
+#[test]
+fn serve_entrypoints_are_synchronous_and_do_not_pending() {
+    let tcp = include_str!("../../src/core/tcp.rs");
+    let udp = include_str!("../../src/core/udp.rs");
+
+    assert!(tcp.contains("pub fn serve"));
+    assert!(udp.contains("pub fn serve"));
+    assert!(!tcp.contains("pub async fn serve"));
+    assert!(!udp.contains("pub async fn serve"));
+    assert!(!tcp.contains("std::future::pending"));
+    assert!(!udp.contains("std::future::pending"));
+    assert!(!tcp.contains("pending::<"));
+    assert!(!udp.contains("pending::<"));
 }
 
 #[test]
