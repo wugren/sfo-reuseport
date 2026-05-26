@@ -35,4 +35,4 @@ pub use crate::core::{
     TransparentMode, UdpServer, WorkerCount,
 };
 #[cfg(not(all(feature = "runtime-tokio-uring", not(target_os = "linux"))))]
-pub use crate::runtime::{TcpStream, UdpSocket};
+pub use crate::runtime::{spawn, TcpStream, UdpSocket};

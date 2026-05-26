@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -8,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::core::{Error, ListenerConfig, ServerRuntimeConfig, ServiceConfig, WorkerCount};
-use crate::runtime::{self, IntoExecutorTask};
+use crate::runtime;
 
 #[derive(Clone)]
 pub struct ServerRuntime {
@@ -85,18 +86,30 @@ impl ServerRuntime {
         self.inner.workers.len()
     }
 
-    pub(crate) fn submit_to_worker<T>(&self, worker_id: usize, task: T) -> Result<(), Error>
+    #[cfg(feature = "runtime-tokio-uring")]
+    pub(crate) fn submit_to_worker<T, Fut>(&self, worker_id: usize, task: T) -> Result<(), Error>
     where
-        T: IntoExecutorTask,
+        T: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
     {
         let worker = self.worker(worker_id)?;
-        worker.submit(task).map_err(Error::from)
+        worker.submit(runtime::executor_task(task)).map_err(Error::from)
+    }
+
+    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
+    pub(crate) fn submit_to_worker<T, Fut>(&self, worker_id: usize, task: T) -> Result<(), Error>
+    where
+        T: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let worker = self.worker(worker_id)?;
+        worker.submit(runtime::executor_task(task)).map_err(Error::from)
     }
 
     pub(crate) fn worker_executor(
         &self,
         worker_id: usize,
-    ) -> Result<&runtime::WorkerExecutorHandle, Error> {
+    ) -> Result<&runtime::ExecutorHandle, Error> {
         Ok(&self.worker(worker_id)?.executor)
     }
 
@@ -143,17 +156,14 @@ impl ServerRuntime {
 }
 
 struct WorkerHandle {
-    executor: runtime::WorkerExecutorHandle,
+    executor: runtime::ExecutorHandle,
     shutdown: Option<runtime::ShutdownSender>,
     join: Option<thread::JoinHandle<()>>,
 }
 
 impl WorkerHandle {
-    fn submit<T>(&self, task: T) -> io::Result<()>
-    where
-        T: IntoExecutorTask,
-    {
-        self.executor.spawn_task(task.into_executor_task())
+    fn submit(&self, task: runtime::ExecutorTask) -> io::Result<()> {
+        self.executor.spawn_task(task)
     }
 }
 

@@ -70,18 +70,20 @@ pub(crate) type ShutdownReceiver = tokio::sync::oneshot::Receiver<()>;
 pub(crate) type ExecutorTask =
     Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static>;
 
-pub(crate) trait IntoExecutorTask {
-    fn into_executor_task(self) -> ExecutorTask;
-}
-
-impl<F, Fut> IntoExecutorTask for F
+pub(crate) fn executor_task<F, Fut>(task: F) -> ExecutorTask
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = ()> + 'static,
 {
-    fn into_executor_task(self) -> ExecutorTask {
-        Box::new(move || Box::pin(self()))
-    }
+    Box::new(move || Box::pin(task()))
+}
+
+pub fn spawn<F>(future: F) -> io::Result<()>
+where
+    F: Future<Output = ()> + 'static,
+{
+    tokio_uring::spawn(future);
+    Ok(())
 }
 
 pub(crate) fn shutdown_channel() -> (ShutdownSender, ShutdownReceiver) {
@@ -108,7 +110,7 @@ pub struct CurrentThreadExecutor {
     inner: CurrentThreadExecutorInner,
 }
 
-pub(crate) struct WorkerExecutorHandle {
+pub(crate) struct ExecutorHandle {
     owner_thread: ThreadId,
     task_sender: tokio::sync::mpsc::UnboundedSender<ExecutorTask>,
 }
@@ -127,8 +129,8 @@ impl CurrentThreadExecutor {
         })
     }
 
-    pub(crate) fn handle(&self) -> WorkerExecutorHandle {
-        WorkerExecutorHandle {
+    pub(crate) fn handle(&self) -> ExecutorHandle {
+        ExecutorHandle {
             owner_thread: self.owner_thread,
             task_sender: self.task_sender.clone(),
         }
@@ -183,7 +185,7 @@ impl CurrentThreadExecutor {
     }
 }
 
-impl WorkerExecutorHandle {
+impl ExecutorHandle {
     pub(crate) fn spawn_task(&self, task: ExecutorTask) -> io::Result<()> {
         if thread::current().id() == self.owner_thread {
             tokio_uring::spawn(task());
@@ -195,13 +197,15 @@ impl WorkerExecutorHandle {
     }
 }
 
-pub(crate) async fn submit_or_run_local<T, Fut>(
-    _executor: &WorkerExecutorHandle,
+pub(crate) async fn submit_or_run_local<T, TaskFut, LocalFut>(
+    _executor: &ExecutorHandle,
     _task: T,
-    local: Fut,
+    local: LocalFut,
 ) -> io::Result<()>
 where
-    Fut: Future<Output = ()>,
+    T: FnOnce() -> TaskFut,
+    TaskFut: Future<Output = ()>,
+    LocalFut: Future<Output = ()>,
 {
     local.await;
     Ok(())

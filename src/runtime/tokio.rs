@@ -15,20 +15,24 @@ pub(crate) const SUPPORTS_USERSPACE_REUSEPORT_SIMULATION: bool = true;
 pub(crate) struct ShutdownSender(tokio::sync::oneshot::Sender<()>);
 pub(crate) type ShutdownReceiver = tokio::sync::oneshot::Receiver<()>;
 pub(crate) type ExecutorTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-pub(crate) type WorkerExecutorHandle = CurrentThreadExecutor;
+pub(crate) type ExecutorHandle = CurrentThreadExecutor;
 
-pub(crate) trait IntoExecutorTask {
-    fn into_executor_task(self) -> ExecutorTask;
-}
-
-impl<F, Fut> IntoExecutorTask for F
+pub(crate) fn executor_task<F, Fut>(task: F) -> ExecutorTask
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    fn into_executor_task(self) -> ExecutorTask {
-        Box::pin(self())
-    }
+    Box::pin(task())
+}
+
+pub fn spawn<F>(future: F) -> io::Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::runtime::Handle::try_current()
+        .map_err(|error| io::Error::new(io::ErrorKind::NotConnected, error))?
+        .spawn(future);
+    Ok(())
 }
 
 pub(crate) fn shutdown_channel() -> (ShutdownSender, ShutdownReceiver) {
@@ -108,16 +112,17 @@ impl CurrentThreadExecutor {
     }
 }
 
-pub(crate) async fn submit_or_run_local<T, Fut>(
-    executor: &WorkerExecutorHandle,
+pub(crate) async fn submit_or_run_local<T, TaskFut, LocalFut>(
+    executor: &ExecutorHandle,
     task: T,
-    _local: Fut,
+    _local: LocalFut,
 ) -> io::Result<()>
 where
-    T: IntoExecutorTask,
-    Fut: Future<Output = ()>,
+    T: FnOnce() -> TaskFut + Send + 'static,
+    TaskFut: Future<Output = ()> + Send + 'static,
+    LocalFut: Future<Output = ()>,
 {
-    executor.spawn_task(task.into_executor_task())
+    executor.spawn_task(executor_task(task))
 }
 
 pub fn tcp_listener_from_std(listener: StdTcpListener) -> io::Result<TcpListener> {
