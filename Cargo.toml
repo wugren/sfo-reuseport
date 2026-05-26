@@ -1,0 +1,20 @@
+[package]
+name = "sfo-reuseport"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["runtime-tokio"]
+runtime-tokio = ["dep:tokio", "tokio/sync"]
+runtime-async-std = ["dep:async-executor", "dep:async-std"]
+runtime-tokio-uring = ["dep:tokio", "dep:tokio-uring", "tokio/sync", "tokio/time"]
+
+[dependencies]
+async-executor = { version = "1.14", optional = true }
+async-std = { version = "1.13", optional = true, features = ["attributes"] }
+num_cpus = "1.16"
+socket2 = { version = "0.5", features = ["all"] }
+tokio = { version = "1.45", optional = true, features = ["net", "rt", "rt-multi-thread", "macros", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-uring = { version = "0.5", optional = true }

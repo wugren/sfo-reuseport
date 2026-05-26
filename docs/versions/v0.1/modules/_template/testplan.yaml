@@ -1,0 +1,56 @@
+schema_version: 1
+version: v0.1
+module: example-module
+submodule:
+defaults:
+  workdir: .
+  timeout_sec: 600
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: core logic and submodule unit tests
+    test_targets:
+      - tests/unit/example-module
+    preconditions:
+      tools: []
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: example-unit
+        name: run unit tests
+        change_ids: ["CHG-example"]
+        run: ["<tool>", "<args>"]
+
+  dv:
+    mode: enabled
+    summary: single-module runnable verification
+    test_targets:
+      - tests/dv/example-module
+    preconditions:
+      tools: []
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: example-dv
+        name: run dv tests
+        change_ids: ["CHG-example"]
+        run: ["<tool>", "<args>"]
+
+  integration:
+    mode: enabled
+    summary: neighbor-module integration verification
+    test_targets:
+      - tests/integration/example-module
+    preconditions:
+      tools: []
+      env: []
+      services: []
+      notes: []
+    steps:
+      - id: example-integration
+        name: run integration tests
+        change_ids: ["CHG-example"]
+        run: ["<tool>", "<args>"]

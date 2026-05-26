@@ -1,0 +1,182 @@
+schema_version: 1
+version: v0.1
+module: sfo-reuseport
+submodule:
+defaults:
+  workdir: .
+  timeout_sec: 600
+  env: {}
+levels:
+  unit:
+    mode: enabled
+    summary: 核心逻辑、公开 API 编译契约和纯业务规则测试
+    test_targets:
+      - src/lib.rs
+      - src/runtime
+      - src/core
+      - tests/unit
+    preconditions:
+      tools: []
+      env: []
+      services: []
+      notes:
+        - 实现阶段需要创建对应 unit 测试文件。
+    steps:
+      - id: runtime-default-feature
+        name: 默认 tokio runtime feature 编译与类型契约
+        change_ids: ["CHG-runtime-features"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: runtime-mutual-exclusion
+        name: 双 runtime feature 互斥 compile-fail
+        change_ids: ["CHG-runtime-features"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: tokio-uring-runtime-api
+        name: tokio-uring runtime 公开 socket 类型契约
+        change_ids: ["CHG-tokio-uring-runtime"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: worker-model
+        name: worker 数量解析和非法配置
+        change_ids: ["CHG-worker-model"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: server-runtime-api
+        name: ServerRuntime 共享 worker 配置和公开 API 表面
+        change_ids: ["CHG-server-runtime", "CHG-worker-model"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: explicit-runtime-serve-api
+        name: TcpServer UdpServer QuicServer 只接受显式 ServerRuntime 的 serve 入口
+        change_ids: ["CHG-server-runtime", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: worker-thread-runtime
+        name: 每 worker 独立线程和单线程 async runtime 启动路径
+        change_ids: ["CHG-worker-thread-runtime", "CHG-worker-model", "CHG-server-runtime"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: callback-signature-no-worker-id
+        name: TCP 和 UDP 回调签名不暴露 worker id
+        change_ids: ["CHG-worker-model", "CHG-tcp-serve", "CHG-udp-runtime-socket"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: udp-runtime-socket-api
+        name: UDP handler runtime 原生 UdpSocket API 契约
+        change_ids: ["CHG-udp-runtime-socket"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: linux-compatible-scheduling
+        name: Linux 兼容内部调度和 Dispatcher API 缺失契约
+        change_ids: ["CHG-linux-compatible-scheduling"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: socket-options-unit
+        name: socket options 配置和错误映射单元测试
+        change_ids: ["CHG-socket-options", "CHG-platform-behavior"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: socket-init-callback
+        name: ServiceConfig socket 创建后回调配置和错误映射
+        change_ids: ["CHG-socket-init-callback"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: server-runtime-listener-api
+        name: ServerRuntime listener 标识和错误语义
+        change_ids: ["CHG-server-runtime", "CHG-dynamic-listeners", "CHG-mixed-protocol-workers"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: quic-route-key-parsing
+        name: QUIC routed UDP 路由键解析和非法 packet 边界
+        change_ids: ["CHG-quic-routed-udp"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: quic-reuseport-bpf-unit
+        name: Linux QUIC reuse-port eBPF selector 指令和 fallback 单元覆盖
+        change_ids: ["CHG-quic-routed-udp", "CHG-platform-behavior"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+
+  dv:
+    mode: enabled
+    summary: 单模块可运行验证、feature 组合编译和当前平台 cfg 检查
+    test_targets:
+      - Cargo.toml
+      - src/lib.rs
+      - src/platform
+      - tests/dv
+    preconditions:
+      tools: []
+      env: []
+      services: []
+      notes:
+        - 实现阶段需要扩展 canonical test runner 或测试文件以覆盖 feature 组合。
+    steps:
+      - id: runtime-async-std-feature
+        name: async-std runtime feature 编译
+        change_ids: ["CHG-runtime-features"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
+      - id: runtime-tokio-uring-feature
+        name: tokio-uring runtime feature Linux all-targets 编译
+        change_ids: ["CHG-tokio-uring-runtime", "CHG-runtime-features"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
+      - id: platform-current-target
+        name: 当前目标平台 cfg 和 socket backend 编译
+        change_ids: ["CHG-platform-behavior"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
+      - id: quic-reuseport-bpf
+        name: 当前目标 QUIC reuse-port eBPF selector 或 fallback 编译验证
+        change_ids: ["CHG-quic-routed-udp", "CHG-platform-behavior"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
+      - id: socket-options-dv
+        name: 当前平台无特权 socket option 设置路径
+        change_ids: ["CHG-socket-options", "CHG-platform-behavior"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
+      - id: socket-init-callback-dv
+        name: 当前平台 TCP UDP bind 路径 socket 初始化回调
+        change_ids: ["CHG-socket-init-callback"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
+
+  integration:
+    mode: enabled
+    summary: loopback TCP/UDP 行为、公开接口错误路径和平台验证
+    test_targets:
+      - tests/integration
+      - src/core/tcp.rs
+      - src/core/udp.rs
+      - src/platform
+    preconditions:
+      tools: []
+      env: []
+      services: []
+      notes:
+        - 实现阶段需要创建 loopback integration tests。
+        - platform-os-matrix 需要 CI matrix 或人工在目标 OS 执行。
+        - transparent-privileged-manual 需要具备 IPv4 transparent 所需权限和系统配置。
+    steps:
+      - id: tcp-loopback-serve
+        name: TCP loopback 多连接 accept 和回调交付
+        change_ids: ["CHG-tcp-serve", "CHG-worker-model", "CHG-worker-thread-runtime", "CHG-runtime-features"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: tcp-error-paths
+        name: TCP bind handler 和非法配置错误路径
+        change_ids: ["CHG-tcp-serve", "CHG-worker-model"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: udp-loopback-serve
+        name: UDP loopback packet metadata 和 runtime 原生 UdpSocket response path
+        change_ids: ["CHG-udp-runtime-socket", "CHG-worker-model", "CHG-worker-thread-runtime", "CHG-runtime-features"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: dynamic-listeners
+        name: 运行期新增和删除 TCP/UDP listener
+        change_ids: ["CHG-dynamic-listeners", "CHG-tcp-serve", "CHG-udp-runtime-socket"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: mixed-protocol-workers
+        name: 同一 ServerRuntime 实例同时处理 TCP 与 UDP listener
+        change_ids: ["CHG-server-runtime", "CHG-mixed-protocol-workers", "CHG-dynamic-listeners", "CHG-worker-model", "CHG-worker-thread-runtime"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: quic-routed-udp
+        name: QUIC routed UDP worker shard 稳定投递
+        change_ids: ["CHG-quic-routed-udp", "CHG-udp-runtime-socket", "CHG-worker-model", "CHG-worker-thread-runtime"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: quic-routed-udp-bpf-fallback
+        name: QUIC routed UDP Linux eBPF/CBPF selector 或用户态 fallback 稳定投递
+        change_ids: ["CHG-quic-routed-udp", "CHG-platform-behavior", "CHG-udp-runtime-socket", "CHG-worker-model", "CHG-worker-thread-runtime"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: platform-os-matrix
+        name: Linux macOS FreeBSD Windows 平台矩阵验证
+        change_ids: ["CHG-platform-behavior"]
+        mode: manual
+        manual_reason: 单机无法覆盖 Linux、macOS、FreeBSD 和 Windows 全矩阵；需要 CI matrix 或人工在目标 OS 运行。
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: transparent-privileged-manual
+        name: Linux IPv4 transparent 特权路径验证
+        change_ids: ["CHG-socket-options", "CHG-platform-behavior"]
+        mode: manual
+        manual_reason: IPv4 transparent 通常需要 OS 支持、权限或系统配置；特权路径使用 manual 验证。
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
