@@ -1,4 +1,6 @@
-use std::net::UdpSocket;
+use std::io;
+use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::time::Duration;
 
 use crate::core::{Error, ServiceConfig, TransparentMode};
 
@@ -58,8 +60,9 @@ pub(crate) fn bind_quic_udp_reuseport_workers(
         sockets.push(socket);
     }
 
-    if attach_quic_reuseport_ebpf(&sockets[0], workers).is_ok()
-        || attach_quic_reuseport_cbpf(&sockets[0], workers).is_ok()
+    if (attach_quic_reuseport_ebpf(&sockets[0], workers).is_ok()
+        || attach_quic_reuseport_cbpf(&sockets[0], workers).is_ok())
+        && quic_reuseport_selector_routes_probe(&sockets, bind_addr).is_ok()
     {
         Ok(Some(sockets))
     } else {
@@ -81,6 +84,63 @@ pub(crate) fn supports_quic_reuseport_bpf() -> bool {
 
 pub(crate) fn supports_reuse_port_balancing() -> bool {
     true
+}
+
+#[cfg(target_os = "linux")]
+fn quic_reuseport_selector_routes_probe(
+    sockets: &[UdpSocket],
+    bind_addr: SocketAddr,
+) -> io::Result<()> {
+    const PROBE_PACKET: [u8; 10] = [0xc0, 0, 0, 0, 1, 4, 0, 0, 0, 0];
+
+    let target = routable_probe_addr(bind_addr);
+    let sender = UdpSocket::bind(match target {
+        SocketAddr::V4(_) => "127.0.0.1:0",
+        SocketAddr::V6(_) => "[::1]:0",
+    })?;
+    sender.send_to(&PROBE_PACKET, target)?;
+
+    for socket in sockets {
+        socket.set_read_timeout(Some(Duration::from_millis(10)))?;
+    }
+
+    let mut buffer = [0_u8; 16];
+    let result = match sockets.first() {
+        Some(socket) => socket.recv_from(&mut buffer).and_then(|(len, _)| {
+            if buffer[..len] == PROBE_PACKET {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "QUIC reuse-port selector probe received unexpected packet",
+                ))
+            }
+        }),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "worker count must be greater than zero",
+        )),
+    };
+
+    for socket in sockets {
+        let _ = socket.set_read_timeout(None);
+    }
+
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn routable_probe_addr(addr: SocketAddr) -> SocketAddr {
+    if !addr.ip().is_unspecified() {
+        return addr;
+    }
+
+    match addr {
+        SocketAddr::V4(addr) => SocketAddr::new(IpAddr::from([127, 0, 0, 1]), addr.port()),
+        SocketAddr::V6(addr) => {
+            SocketAddr::new(IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1]), addr.port())
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
