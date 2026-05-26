@@ -1,6 +1,4 @@
 #[cfg(not(feature = "runtime-tokio-uring"))]
-use std::io::ErrorKind;
-#[cfg(not(feature = "runtime-tokio-uring"))]
 use std::net::SocketAddr;
 
 #[cfg(not(feature = "runtime-tokio-uring"))]
@@ -9,9 +7,20 @@ use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, ServiceConfig, Tc
 #[cfg(feature = "runtime-tokio-uring")]
 fn main() {}
 
-#[cfg(not(feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    run().await
+}
+
+#[cfg(feature = "runtime-async-std")]
+#[async_std::main]
+async fn main() -> Result<(), Error> {
+    run().await
+}
+
+#[cfg(not(feature = "runtime-tokio-uring"))]
+async fn run() -> Result<(), Error> {
     let bind_addr: SocketAddr = "127.0.0.1:7000"
         .parse()
         .map_err(|error| Error::InvalidConfig(format!("invalid bind address: {error}")))?;
@@ -24,8 +33,10 @@ async fn main() -> Result<(), Error> {
     std::future::pending::<Result<(), Error>>().await
 }
 
-#[cfg(not(feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 async fn echo_connection(stream: sfo_reuseport::TcpStream) -> Result<(), Error> {
+    use std::io::ErrorKind;
+
     let mut buffer = [0_u8; 4096];
 
     loop {
@@ -39,8 +50,10 @@ async fn echo_connection(stream: sfo_reuseport::TcpStream) -> Result<(), Error> 
     }
 }
 
-#[cfg(not(feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 async fn write_all(stream: &sfo_reuseport::TcpStream, mut bytes: &[u8]) -> Result<(), Error> {
+    use std::io::ErrorKind;
+
     while !bytes.is_empty() {
         stream.writable().await?;
         match stream.try_write(bytes) {
@@ -56,4 +69,18 @@ async fn write_all(stream: &sfo_reuseport::TcpStream, mut bytes: &[u8]) -> Resul
     }
 
     Ok(())
+}
+
+#[cfg(feature = "runtime-async-std")]
+async fn echo_connection(mut stream: sfo_reuseport::TcpStream) -> Result<(), Error> {
+    use async_std::io::{ReadExt, WriteExt};
+
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let len = stream.read(&mut buffer).await?;
+        if len == 0 {
+            return Ok(());
+        }
+        stream.write_all(&buffer[..len]).await?;
+    }
 }

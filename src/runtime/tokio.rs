@@ -55,6 +55,12 @@ pub struct CurrentThreadExecutor {
     inner: CurrentThreadExecutorInner,
 }
 
+impl Clone for CurrentThreadExecutor {
+    fn clone(&self) -> Self {
+        self.handle()
+    }
+}
+
 impl CurrentThreadExecutor {
     pub fn new() -> io::Result<Self> {
         let runtime = tokio::runtime::Builder::new_current_thread()

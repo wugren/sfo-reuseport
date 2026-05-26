@@ -1,14 +1,11 @@
-use std::collections::HashMap;
 use std::future::Future;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
-use crate::core::{Error, ListenerConfig, ServerRuntimeConfig, ServiceConfig, WorkerCount};
+use crate::core::{Error, ServerRuntimeConfig, WorkerCount};
 use crate::runtime;
 
 #[derive(Clone)]
@@ -18,28 +15,6 @@ pub struct ServerRuntime {
 
 struct ServerRuntimeInner {
     workers: Vec<WorkerHandle>,
-    next_id: AtomicU64,
-    listeners: Mutex<HashMap<ListenerId, ListenerControl>>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ListenerId(u64);
-
-impl ListenerId {
-    pub fn get(self) -> u64 {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ListenerProtocol {
-    Tcp,
-    Udp,
-}
-
-struct ListenerControl {
-    protocol: ListenerProtocol,
-    addr: SocketAddr,
     active: Arc<AtomicBool>,
 }
 
@@ -60,26 +35,9 @@ impl ServerRuntime {
         Ok(Self {
             inner: Arc::new(ServerRuntimeInner {
                 workers,
-                next_id: AtomicU64::new(1),
-                listeners: Mutex::new(HashMap::new()),
+                active: Arc::new(AtomicBool::new(true)),
             }),
         })
-    }
-
-    pub fn remove_listener(&self, id: ListenerId) -> Result<(), Error> {
-        let control = self
-            .inner
-            .listeners
-            .lock()
-            .map_err(|_| Error::Runtime("listener registry lock poisoned".to_string()))?
-            .remove(&id)
-            .ok_or(Error::UnknownListener)?;
-        control.active.store(false, Ordering::SeqCst);
-        match control.protocol {
-            ListenerProtocol::Tcp => wake_tcp(control.addr),
-            ListenerProtocol::Udp => wake_udp(control.addr),
-        }
-        Ok(())
     }
 
     pub(crate) fn worker_count(&self) -> usize {
@@ -106,45 +64,44 @@ impl ServerRuntime {
         worker.submit(runtime::executor_task(task)).map_err(Error::from)
     }
 
-    pub(crate) fn worker_executor(
-        &self,
-        worker_id: usize,
-    ) -> Result<&runtime::ExecutorHandle, Error> {
-        Ok(&self.worker(worker_id)?.executor)
+    #[cfg(feature = "runtime-tokio-uring")]
+    pub(crate) fn submit_to_executor<T, Fut>(
+        executor: &runtime::ExecutorHandle,
+        task: T,
+    ) -> Result<(), Error>
+    where
+        T: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        executor
+            .spawn_task(runtime::executor_task(task))
+            .map_err(Error::from)
     }
 
-    pub(crate) fn register_listener(
-        &self,
-        protocol: ListenerProtocol,
-        addr: SocketAddr,
-        active: Arc<AtomicBool>,
-    ) -> Result<ListenerId, Error> {
-        let id = self.next_listener_id();
+    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
+    pub(crate) fn submit_to_executor<T, Fut>(
+        executor: &runtime::ExecutorHandle,
+        task: T,
+    ) -> Result<(), Error>
+    where
+        T: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        executor
+            .spawn_task(runtime::executor_task(task))
+            .map_err(Error::from)
+    }
+
+    pub(crate) fn worker_executors(&self) -> Vec<runtime::ExecutorHandle> {
         self.inner
-            .listeners
-            .lock()
-            .map_err(|_| Error::Runtime("listener registry lock poisoned".to_string()))?
-            .insert(
-                id,
-                ListenerControl {
-                    protocol,
-                    addr,
-                    active,
-                },
-            );
-        Ok(id)
+            .workers
+            .iter()
+            .map(|worker| worker.executor.clone())
+            .collect()
     }
 
-    pub(crate) fn service_config(&self, listener: ListenerConfig) -> ServiceConfig {
-        ServiceConfig {
-            bind_addr: listener.bind_addr,
-            socket_options: listener.socket_options,
-            socket_init_callback: None,
-        }
-    }
-
-    fn next_listener_id(&self) -> ListenerId {
-        ListenerId(self.inner.next_id.fetch_add(1, Ordering::SeqCst))
+    pub(crate) fn active_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.inner.active)
     }
 
     fn worker(&self, worker_id: usize) -> Result<&WorkerHandle, Error> {
@@ -152,6 +109,12 @@ impl ServerRuntime {
             .workers
             .get(worker_id)
             .ok_or_else(|| Error::InvalidConfig("worker index is out of range".to_string()))
+    }
+}
+
+impl Drop for ServerRuntimeInner {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::SeqCst);
     }
 }
 
@@ -197,28 +160,4 @@ fn start_worker(name: String) -> io::Result<WorkerHandle> {
         shutdown: Some(shutdown_sender),
         join: Some(join),
     })
-}
-
-fn wake_tcp(addr: SocketAddr) {
-    let _ = std::net::TcpStream::connect_timeout(&wake_addr(addr), Duration::from_millis(50));
-}
-
-fn wake_udp(addr: SocketAddr) {
-    let bind_addr = match addr {
-        SocketAddr::V4(_) => "127.0.0.1:0",
-        SocketAddr::V6(_) => "[::1]:0",
-    };
-    if let Ok(socket) = std::net::UdpSocket::bind(bind_addr) {
-        let _ = socket.send_to(&[], wake_addr(addr));
-    }
-}
-
-fn wake_addr(addr: SocketAddr) -> SocketAddr {
-    if !addr.ip().is_unspecified() {
-        return addr;
-    }
-    match addr {
-        SocketAddr::V4(addr) => SocketAddr::new(IpAddr::from([127, 0, 0, 1]), addr.port()),
-        SocketAddr::V6(addr) => SocketAddr::new(IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1]), addr.port()),
-    }
 }

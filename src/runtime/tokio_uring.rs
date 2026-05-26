@@ -110,6 +110,7 @@ pub struct CurrentThreadExecutor {
     inner: CurrentThreadExecutorInner,
 }
 
+#[derive(Clone)]
 pub(crate) struct ExecutorHandle {
     owner_thread: ThreadId,
     task_sender: tokio::sync::mpsc::UnboundedSender<ExecutorTask>,

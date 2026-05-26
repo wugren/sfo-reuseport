@@ -5,8 +5,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::core::{
-    Error, HandlerFuture, HandlerFutureBox, ListenerConfig, ListenerId, ListenerProtocol,
-    PacketMeta, ServerRuntime, ServiceConfig, linux_reuseport_select,
+    Error, HandlerFuture, HandlerFutureBox, PacketMeta, ServerRuntime, ServiceConfig,
+    linux_reuseport_select,
 };
 use crate::platform;
 use crate::runtime::{self, TcpStream};
@@ -35,55 +35,22 @@ impl TcpServer {
     }
 }
 
-impl ServerRuntime {
-    pub fn add_tcp_listener<F, Fut>(
-        &self,
-        config: ListenerConfig,
-        handler: F,
-    ) -> Result<ListenerId, Error>
-    where
-        F: Fn(TcpStream) -> Fut + Clone + Send + Sync + 'static,
-        Fut: HandlerFuture,
-    {
-        add_tcp_listener(self, config, handler)
-    }
-}
-
-pub(crate) fn add_tcp_listener<F, Fut>(
-    runtime: &ServerRuntime,
-    config: ListenerConfig,
-    handler: F,
-) -> Result<ListenerId, Error>
-where
-    F: Fn(TcpStream) -> Fut + Clone + Send + Sync + 'static,
-    Fut: HandlerFuture,
-{
-    let service_config = runtime.service_config(config);
-    service_config.validate()?;
-    if !platform::supports_reuse_port_balancing() {
-        return add_simulated_listener(runtime, service_config, handler);
-    }
-
-    add_reuse_port_listener(runtime, service_config, handler)
-}
-
 fn add_reuse_port_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
-) -> Result<ListenerId, Error>
+) -> Result<(), Error>
 where
     F: Fn(TcpStream) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
 {
     let listeners = platform::bind_tcp_workers(&service_config, runtime.worker_count())?;
-    let addr = listeners
-        .first()
-        .ok_or_else(|| Error::InvalidConfig("worker count must be greater than zero".to_string()))?
-        .local_addr()
-        .map_err(Error::from)?;
-    let active = Arc::new(AtomicBool::new(true));
-    let id = runtime.register_listener(ListenerProtocol::Tcp, addr, Arc::clone(&active))?;
+    if listeners.is_empty() {
+        return Err(Error::InvalidConfig(
+            "worker count must be greater than zero".to_string(),
+        ));
+    }
+    let active = runtime.active_flag();
 
     let handler = tcp_handler(handler);
     for (worker_id, listener) in listeners.into_iter().enumerate() {
@@ -98,14 +65,14 @@ where
         })?;
     }
 
-    Ok(id)
+    Ok(())
 }
 
 fn add_simulated_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
-) -> Result<ListenerId, Error>
+) -> Result<(), Error>
 where
     F: Fn(TcpStream) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
@@ -118,11 +85,10 @@ where
 
     let listener = platform::bind_tcp(&service_config)?;
     let addr = listener.local_addr().map_err(Error::from)?;
-    let active = Arc::new(AtomicBool::new(true));
-    let id = runtime.register_listener(ListenerProtocol::Tcp, addr, Arc::clone(&active))?;
+    let active = runtime.active_flag();
 
-    let server_runtime = runtime.clone();
-    let worker_count = server_runtime.worker_count();
+    let worker_executors = runtime.worker_executors();
+    let worker_count = worker_executors.len();
     let handler = tcp_handler(handler);
     thread::Builder::new()
         .name("sfo-reuseport-simulated-tcp-accept".to_string())
@@ -130,7 +96,7 @@ where
             simulated_tcp_accept_loop(
                 listener,
                 active,
-                server_runtime,
+                worker_executors,
                 worker_count,
                 addr,
                 handler,
@@ -138,7 +104,7 @@ where
         })
         .map_err(Error::from)?;
 
-    Ok(id)
+    Ok(())
 }
 
 fn tcp_handler<F, Fut>(handler: F) -> TcpHandler
@@ -176,13 +142,12 @@ async fn tcp_listener_loop(
 fn simulated_tcp_accept_loop(
     listener: std::net::TcpListener,
     active: Arc<AtomicBool>,
-    runtime: ServerRuntime,
+    worker_executors: Vec<runtime::ExecutorHandle>,
     worker_count: usize,
     local_addr: std::net::SocketAddr,
     handler: TcpHandler,
 ) {
     if listener.set_nonblocking(true).is_err() {
-        active.store(false, Ordering::SeqCst);
         return;
     }
 
@@ -212,9 +177,12 @@ fn simulated_tcp_accept_loop(
         let Ok(worker_id) = select_simulated_tcp_worker(meta, worker_count) else {
             break;
         };
+        let Some(executor) = worker_executors.get(worker_id) else {
+            break;
+        };
         let handler = Arc::clone(&handler);
-        let submit_result = runtime
-            .submit_to_worker(worker_id, move || async move {
+        let submit_result =
+            ServerRuntime::submit_to_executor(executor, move || async move {
                 let Ok(stream) = runtime::tcp_stream_from_std(stream).map_err(Error::from) else {
                     return;
                 };

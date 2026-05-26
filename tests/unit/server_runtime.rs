@@ -1,4 +1,7 @@
-use sfo_reuseport::{ListenerConfig, ServerRuntime, ServerRuntimeConfig, ServiceConfig, WorkerCount};
+use sfo_reuseport::{
+    QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer, UdpServer,
+    WorkerCount,
+};
 
 #[test]
 fn server_runtime_config_can_set_worker_count() {
@@ -10,13 +13,6 @@ fn server_runtime_config_can_set_worker_count() {
 fn service_config_records_bind_addr_without_worker_count() {
     let addr = "127.0.0.1:0".parse().unwrap();
     let config = ServiceConfig::new(addr);
-    assert_eq!(config.bind_addr, addr);
-}
-
-#[test]
-fn listener_config_records_bind_addr_without_worker_count() {
-    let addr = "127.0.0.1:0".parse().unwrap();
-    let config = ListenerConfig::new(addr);
     assert_eq!(config.bind_addr, addr);
 }
 
@@ -33,23 +29,45 @@ fn server_runtime_does_not_depend_on_server_facades() {
 }
 
 #[test]
-fn tcp_and_udp_servers_can_attach_to_server_runtime() {
+fn servers_can_attach_to_server_runtime_through_serve() {
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
 
-    let tcp = runtime
-        .add_tcp_listener(
-            ListenerConfig::new("127.0.0.1:0".parse().unwrap()),
-            |_stream| async { Ok(()) },
-        )
-        .unwrap();
-    let udp = runtime
-        .add_udp_listener(
-            ListenerConfig::new("127.0.0.1:0".parse().unwrap()),
-            |_socket, _meta, _payload| async { Ok(()) },
-        )
-        .unwrap();
+    TcpServer::serve(
+        &runtime,
+        ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        |_stream| async { Ok(()) },
+    )
+    .unwrap();
+    UdpServer::serve(
+        &runtime,
+        ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        |_socket, _meta, _payload| async { Ok(()) },
+    )
+    .unwrap();
+    QuicServer::serve(
+        &runtime,
+        ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        |_socket, _meta, _payload| async { Ok(()) },
+    )
+    .unwrap();
+}
 
-    assert_ne!(tcp.get(), udp.get());
-    runtime.remove_listener(tcp).unwrap();
-    runtime.remove_listener(udp).unwrap();
+#[test]
+fn listener_dynamic_management_api_is_not_public() {
+    let tcp = include_str!("../../src/core/tcp.rs");
+    let udp = include_str!("../../src/core/udp.rs");
+    let runtime = include_str!("../../src/core/server_runtime.rs");
+    let lib = include_str!("../../src/lib.rs");
+    let core = include_str!("../../src/core/mod.rs");
+
+    assert!(!tcp.contains("pub fn add_tcp_listener"));
+    assert!(!udp.contains("pub fn add_udp_listener"));
+    assert!(!udp.contains("pub fn add_quic_listener"));
+    assert!(!runtime.contains("pub fn remove_listener"));
+    assert!(!runtime.contains("ListenerId"));
+    assert!(!runtime.contains("ListenerProtocol"));
+    assert!(!lib.contains("ListenerId"));
+    assert!(!lib.contains("ListenerProtocol"));
+    assert!(!core.contains("ListenerId"));
+    assert!(!core.contains("ListenerProtocol"));
 }

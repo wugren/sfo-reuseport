@@ -4,7 +4,7 @@ submodule:
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-05-26T15:09:01Z
+approved_at: 2026-05-26T16:04:07Z
 ---
 
 # sfo-reuseport 提案
@@ -32,7 +32,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - 支持通过受控配置设置底层 socket 选项；v0.1 至少覆盖 `reuse_address` 和 IPv4 transparent 相关能力，并允许后续设计定义更多不会破坏 balancer 状态的选项。
 - `ServiceConfig` 支持一个可选 socket 创建后回调，默认 `None`；crate 在创建底层 socket 后、执行 bind/listen 或 runtime socket 转换前调用该回调，让调用方可以设置未被 `SocketOptions` 直接覆盖的 socket 参数。
 - worker 标识属于内部实现细节，不作为用户回调参数或公开 API 契约暴露。
-- 支持服务运行期间动态增加和删除监听接口，调用方可以在不重建整个服务或替换 worker 线程集合的情况下管理 TCP 与 UDP listener。
+- 不提供公开的 listener 动态管理 API；`ServerRuntime` 不暴露 `add_tcp_listener`、`add_udp_listener`、`add_quic_listener` 或 `remove_listener`，TCP/UDP/QUIC-aware UDP listener 只能由 `TcpServer::serve`、`UdpServer::serve` 和 `QuicServer::serve` 注册并随 `ServerRuntime` 生命周期停止。
 - 同一套 worker 线程集合必须能够同时承载 TCP listener 和 UDP listener；协议类型属于监听项属性，而不是独立服务线程池边界。
 - 提供专门的 `QuicServer` UDP 包分配入口，用于按 QUIC Destination Connection ID 或等价 QUIC 路由键把 UDP 数据包稳定分配到 worker；该入口只处理 UDP 包路由，不实现 QUIC 协议栈。
 - 提供一个基于 hyper 的 HTTP 静态文件服务器示例，用于展示如何在 `examples/` 中把本 crate 的 TCP 服务能力接入上层 HTTP 协议处理；静态文件根目录必须可通过命令行参数设置。
@@ -47,8 +47,8 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - 不在公开 API 中暴露平台特定的 reuse-port 设置细节。
 - 不提供可接管、替换、长期持有或在 bind 之后修改 balancer socket 状态的 raw socket escape hatch；socket 创建后回调只能作为一次性初始化钩子进入，并且不得覆盖 balancer 必需的内部 reuse-port 或 bind 状态。
 - 不支持同时启用 tokio、async-std 和 tokio-uring runtime feature 中的多个。
-- 不提供文件监听、配置中心订阅或自动热加载机制；动态增删监听由调用方显式 API 驱动。
-- 不承诺在 listener 删除时终止已经交付给用户回调的 TCP 连接处理。
+- 不提供文件监听、配置中心订阅、自动热加载机制，或公开 listener 动态新增/删除 API。
+- 不提供按 listener id 删除单个 listener 的公开生命周期管理能力；已交付给用户回调的工作随用户 future 自身生命周期完成或失败。
 
 ### 与相邻模块的边界
 - 本 crate 负责 `src/` 下的 socket 均衡 API 和 worker 生命周期。
@@ -64,7 +64,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - UDP 回调形态需要包含足够的数据包元信息以支持实际处理，同时直接使用所选 runtime 的原生 `UdpSocket`。
   - socket 选项配置需要区分跨平台选项、平台 gated 选项和需要特权或系统配置的选项；不可用或设置失败时的错误语义由后续设计定义。
   - socket 创建后回调需要由后续设计定义准确类型、调用时机、错误传播、TCP/UDP 复用方式，以及与内部必需 socket 选项冲突时的处理。
-  - 动态删除监听接口的语义是停止接收该监听项的新 TCP 连接或 UDP 数据包；已经交付给用户回调的工作按用户 future 自身生命周期完成或失败。
+  - listener 生命周期由 `ServerRuntime` 拥有；v0.1 不提供公开 `ListenerId` 删除路径，已经交付给用户回调的工作按用户 future 自身生命周期完成或失败。
   - 同一套线程同时处理 TCP 与 UDP 时，公平性、唤醒和错误隔离由后续设计定义；v0.1 不要求跨协议流量的负载感知调度。
   - `QuicServer` 由本 crate 负责 UDP 包分配与 worker 稳定路由，QUIC 协议状态由调用方或上层 QUIC crate 负责；如果上层需要连接迁移或 NAT rebinding，必须使用能够让本 crate 从数据包中恢复目标 worker 的 QUIC 路由键。
   - `QuicServer` 的公开命名表示 QUIC-aware UDP routing，不表示本 crate 提供完整 QUIC server 协议栈。
@@ -75,7 +75,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - `TcpServer`、`UdpServer` 和 `QuicServer` 的 handler trait bounds、返回 future 生命周期和停止语义需要在设计阶段与唯一 `serve` 签名同步。
   - 最低 Rust 版本和支持的 OS 版本矩阵。
   - IPv4 transparent 等平台能力在非 Linux 平台上应表现为编译期不可用、运行时 `Unsupported`，还是由更通用的 capability 机制表达。
-  - 动态 listener 标识符由调用方提供还是由 crate 分配。
+  - 不再保留公开 `ListenerId` 管理面；`serve` 入口注册 listener 后只返回启动结果。
   - 同一 socket 地址上同时存在 TCP 与 UDP listener 时，配置 API 是否允许复用同一个逻辑名称。
   - `QuicServer` 在 Linux eBPF reuse-port selector 不可用时应返回 `Unsupported`，还是退回用户态 UDP 包分发。
   - 初始 QUIC 数据包或缺少可识别 worker 路由键的数据包应被丢弃、按来源地址分配，还是交给调用方指定的默认 worker。
@@ -115,7 +115,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - tokio、async-std 与 tokio-uring 通过互斥 crate feature 提供同形 API；启用 tokio-uring 时，用户回调获得 tokio-uring 原生 socket/stream 能力。
 - UDP 用户获得与 Linux `SO_REUSEPORT` 语义一致的确定性 worker 分配；公开 API 不提供策略选择或自定义分发回调。
 - QUIC UDP 用户可以使用专门的 `QuicServer` 入口，让具备 QUIC 路由键的数据包在多 worker reuse-port 场景下稳定进入同一 worker，而无需本 crate 接管 QUIC 协议状态。
-- 用户可以在服务运行期间显式增加或删除 TCP/UDP 监听项，并让这些监听项共享同一套 worker 线程集合。
+- 用户可以通过 `serve` 入口注册 TCP/UDP/QUIC-aware UDP 监听项，并让这些监听项共享同一套 worker 线程集合；v0.1 不提供运行期按 listener id 增删监听项的公开管理面。
 - 用户可以显式创建一个 `ServerRuntime`，在其中注册 TCP/UDP server 或 listener；worker 数量在 `ServerRuntime` 初始化时确定，并被该 runtime 下的所有 server 共享。
 - 用户通过同步的 `TcpServer::serve(&runtime, config, handler)`、`UdpServer::serve(&runtime, config, handler)` 或 `QuicServer::serve(&runtime, config, handler)` 使用单协议入口时，仍然复用同一个显式 `ServerRuntime`，公开 API 表面不出现第二套 runtime 创建方式，且调用完成 listener 注册后立即返回启动结果。
 - 用户可以运行 `examples/` 下的 hyper 静态文件服务器示例，并通过命令行参数选择静态文件根目录和监听地址。
@@ -134,7 +134,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | P-platform | CHG-platform-behavior | 用相同 API 屏蔽 Linux、macOS、FreeBSD 和 Windows socket 行为差异。 | 平台特定 socket 设置和 Windows 模拟路径。 | 平台 gated 编译检查或文档化验证覆盖每类支持平台。 | 不提供公开的平台特定 API 变体。 |
 | P-socket-options | CHG-socket-options | 提供受控且可扩展的 socket 选项配置，至少支持 `reuse_address` 与 IPv4 transparent 相关设置。 | TCP/UDP bind 前 socket 选项配置、平台能力表达、错误语义和与 balancer 内部状态的冲突处理。 | 测试或文档化验证展示支持的选项被应用，不支持或无权限的选项产生明确错误，且调用方不能通过选项破坏 balancer 状态。 | 不提供任意 raw fd/raw socket 访问，不把未设计的系统 socket 选项承诺为稳定 API。 |
 | P-socket-init-callback | CHG-socket-init-callback | `ServiceConfig` 提供默认 `None` 的 socket 创建后回调；socket 创建完成后、bind/listen 或 runtime 转换前调用该回调，使调用方可设置额外 socket 参数。 | `ServiceConfig` 配置表面、TCP/UDP socket 创建路径、回调错误传播，以及与内部必需 socket 状态的冲突边界。 | 测试展示默认 `None` 不改变现有行为；配置回调时 TCP/UDP socket 创建路径都会调用它；回调返回错误会阻止服务启动并保留错误信息。 | 不允许回调接管或替换 socket，不允许在回调返回后继续修改 balancer 拥有的 socket 状态，不承诺任意平台私有选项跨平台可用。 |
-| P-dynamic-listeners | CHG-dynamic-listeners | 提供运行期动态增加和删除 TCP/UDP 监听接口的受控 API。 | listener 生命周期、listener 标识、运行期 bind/unbind、删除后的新工作停止交付语义。 | 测试或可运行验证展示服务启动后新增 TCP/UDP listener 可接收工作，删除 listener 后不再接收新工作，且已交付工作不被 balancer 强制中断。 | 不提供配置文件热加载或外部配置订阅。 |
+| P-dynamic-listeners | CHG-dynamic-listeners | 不公开 listener 动态管理 API；删除 `ServerRuntime` 内部 listener registry 以及 `ListenerId`/`remove_listener` 管理面，listener 随 `ServerRuntime` 生命周期停止。 | listener 生命周期、公开 API 表面、runtime drop 停止边界、worker 投递状态。 | API 编译覆盖证明 `ServerRuntime` 不提供 `add_tcp_listener`、`add_udp_listener`、`add_quic_listener` 或 `remove_listener`，crate 根不导出 `ListenerId`/`ListenerProtocol`；运行期验证 TCP/UDP/QUIC listener 仍可通过 `serve` 注册并接收工作。 | 不提供公开 listener 动态新增/删除 API；不提供单 listener stop handle；不提供配置文件热加载或外部配置订阅。 |
 | P-mixed-protocol-workers | CHG-mixed-protocol-workers | 同一套 worker 线程集合同时支持 TCP 和 UDP 监听项。 | worker 池、协议监听项注册、跨协议事件调度和错误隔离。 | 测试或可运行验证展示一个服务实例内 TCP 与 UDP listener 同时工作，并共享同一 worker 配置。 | 不提供按协议独立线程池作为 v0.1 默认模型，不实现跨协议自适应调度。 |
 | P-quic-routed-udp | CHG-quic-routed-udp | 提供专门的 `QuicServer` UDP 包分配入口，按 QUIC DCID 前 2 字节 big-endian `u16` worker shard 将同一逻辑连接的数据包稳定交付到同一 worker。 | 同步 `QuicServer::serve(runtime: &ServerRuntime, config: ServiceConfig, handler: F)`、QUIC header 路由字段读取、16-bit worker shard 选择、非法或缺失路由键处理、Linux 高性能 reuse-port 路径以及非 Linux 或不可用路径的行为边界。 | 测试或可运行验证展示具备 16-bit QUIC 路由键的数据包被稳定路由到目标 worker，不满足固定 CID layout 的数据包被丢弃，且该入口不提供 TLS、handshake、connection 或 stream API；API 编译覆盖确认 `QuicServer` 只有一个同步 `serve` 入口、必须传入 `&ServerRuntime`，且方法内部不使用 `pending` 挂起。 | 不实现 QUIC 协议栈，不替代 quinn 等上层 QUIC crate，不提供 TLS 配置或 QUIC stream/connection 抽象；不支持可配置 CID layout；不提供无 runtime 参数的 QUIC-aware UDP serve 入口；不把 `serve` 做成异步 lifecycle future。 |
 | P-hyper-static-example | CHG-hyper-static-example | 提供一个 hyper HTTP 静态文件服务器示例，展示上层协议如何使用本 crate 的 TCP 服务入口处理 HTTP 请求。 | `examples/` 示例代码、示例所需 Cargo 依赖或 example target 配置、命令行参数解析、静态根目录解析、基础 HTTP 响应和错误响应。 | `cargo check --example <name>` 或 harness 测试证明示例可编译；可运行验证证明 `--root <path>` 能设置静态根目录，普通文件返回 200，缺失文件返回 404，路径遍历请求不逃逸静态根目录。 | 不把 HTTP 静态服务变成 library API；不承诺生产级静态服务器能力、目录浏览、缓存控制、压缩、range 请求、TLS 或完整 MIME 数据库。 |
@@ -146,7 +146,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - UDP 回调接收所选 feature 匹配的 runtime 原生 `UdpSocket`，公开 API 不导出 `BalancedUdpSocket`。
   - 用户可以在创建 TCP 或 UDP 服务时声明受控 socket 选项，例如 `reuse_address` 和 IPv4 transparent；平台不支持或权限不足时得到明确错误。
   - 用户可以在 `ServiceConfig` 中选择性提供 socket 创建后初始化回调；未提供时行为与默认配置一致，提供时回调在 TCP/UDP 底层 socket 创建后被调用，回调失败会使服务启动失败。
-  - 用户可以在服务运行期间通过受控 API 增加或删除 TCP/UDP 监听项。
+  - 用户不能通过 `ServerRuntime` 公开 API 动态新增或删除 listener；TCP/UDP/QUIC-aware UDP 监听通过 `TcpServer::serve`、`UdpServer::serve` 和 `QuicServer::serve` 注册并随 runtime 生命周期停止。
   - 同一个服务实例和同一套 worker 配置可以同时处理 TCP 连接和 UDP 数据包。
   - 用户可以使用 `QuicServer` 入口获得 QUIC-aware UDP 包分配能力；同一 16-bit QUIC worker shard 对应的数据包稳定进入同一 worker，且公开 API 不包含 TLS、handshake、connection 或 stream 配置。
   - 用户可以通过 hyper 静态文件服务器示例指定静态文件根目录并验证基础 HTTP 静态文件响应，同时该示例不改变 crate 公开 API。
@@ -156,7 +156,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - 平台差异不出现在公开 API 中；公开 API 不包含 Dispatcher/DispatchPolicy 或可配置调度策略。
 - 必需证据：
   - 实现前，approved `proposal.md` 和 `design.md` 都直接映射相关 `change_id`，并通过 schema/admission 检查。
-  - 实现后，测试阶段通过生成或更新测试实现、可选 `testing.md`、可选 `testplan.yaml`，覆盖 runtime feature gating、tokio-uring 公开接口可用性、worker 行为、TCP 服务、UDP 服务、QUIC-aware UDP 包分配、动态 listener 增删、混合协议 worker、Linux 兼容内部调度、socket 选项配置和平台特定编译验证。
+  - 实现后，测试阶段通过生成或更新测试实现、可选 `testing.md`、可选 `testplan.yaml`，覆盖 runtime feature gating、tokio-uring 公开接口可用性、worker 行为、TCP 服务、UDP 服务、QUIC-aware UDP 包分配、listener 动态管理 API 不公开、混合协议 worker、Linux 兼容内部调度、socket 选项配置和平台特定编译验证。
   - `CHG-hyper-static-example` 实现后，测试阶段覆盖示例编译、可配置静态根目录、基础 200/404 响应和路径遍历拒绝。
   - 已实现变更集的 canonical harness 测试命令通过；若某个平台特定验证路径为 manual，必须明确记录原因。
 - 明确非目标：
@@ -168,7 +168,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - 如果未精确定义 Linux 兼容调度语义，Windows 或其他 fallback 用户态模拟可能偏离 Linux `SO_REUSEPORT` 行为。
 - Linux 兼容调度的 hash 输入必须确定且有界，避免平台间 worker 选择漂移。
 - 如果 API bounds 过于含糊，多线程回调执行会掩盖 runtime 原生 `UdpSocket` 的 clone/share 和生命周期要求。
-- 动态删除 listener 时如果关闭语义不清，可能导致调用方误以为已有 TCP 连接会被强制中断。
+- 如果公开 API 表面残留 `add_tcp_listener`、`add_udp_listener`、`add_quic_listener`、`remove_listener` 或 `ListenerId`，调用方会误以为 crate 支持动态 listener 管理；实现和测试必须移除这些公开符号。
 - TCP 与 UDP 共享同一 worker 池后，若调度和错误隔离设计不足，单一协议的高负载或 handler 错误可能影响另一协议的可用性。
 - 如果 `QuicServer` 的命名没有清楚限定为 UDP 包分配入口，调用方可能误以为本 crate 提供完整 QUIC server、TLS 或 stream 语义。
 - QUIC 路由字段来自未受信任网络输入；如果解析边界、非法长度、版本差异或防伪规则定义不足，可能导致错误路由、worker 倾斜或拒绝服务风险。
@@ -200,9 +200,9 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | FU-029 | implementation | 仅在 proposal/design 重新批准且 `CHG-udp-runtime-socket` 及相关 change_id 实现准入通过后，删除 `BalancedUdpSocket` 代码并迁移回调参数为 `UdpSocket`；相关测试代码和测试元数据在后续 testing 阶段同步。 | P-udp/P-quic-routed-udp | yes |
 | FU-007 | design | 定义 socket 选项配置 API、平台能力模型、设置时机、错误类型，以及与内部 reuse-port/bind 状态冲突时的处理。 | P-socket-options/P-platform/P-tcp/P-udp | yes |
 | FU-008 | testing | 为 `CHG-socket-options` 增加直接测试计划，覆盖成功设置、unsupported/permission-denied 错误和不允许破坏 balancer 状态的负例。 | P-socket-options/P-platform/P-tcp/P-udp | yes |
-| FU-009 | design | 定义动态 listener 管理 API、listener 标识、运行期 bind/unbind、删除语义、并发安全和错误隔离。 | P-dynamic-listeners/P-mixed-protocol-workers/P-workers/P-tcp/P-udp | yes |
-| FU-010 | testing | 为动态 listener 增删和同一 worker 池混合 TCP/UDP 监听增加直接测试计划和 `testplan.yaml` 条目。 | P-dynamic-listeners/P-mixed-protocol-workers/P-workers/P-tcp/P-udp | yes |
-| FU-011 | implementation | 仅在 design 重新批准且新 `change_id` 实现准入通过后，实施动态 listener 和混合协议 worker；相关验证归属后续 testing 阶段。 | P-dynamic-listeners/P-mixed-protocol-workers | yes |
+| FU-009 | design | 从公开 API 和内部 runtime 设计中移除 listener registry、`ListenerId`、`ListenerProtocol`、`remove_listener`、`add_tcp_listener`、`add_udp_listener` 和 `add_quic_listener`，改为由 `serve` 入口注册并随 runtime 生命周期停止。 | P-dynamic-listeners/P-mixed-protocol-workers/P-workers/P-tcp/P-udp/P-quic-routed-udp | yes |
+| FU-010 | testing | 更新测试计划，删除 listener 动态新增/删除验证，新增动态管理符号不公开的 API 覆盖，并保留 TCP/UDP/QUIC `serve` 注册能力验证。 | P-dynamic-listeners/P-mixed-protocol-workers/P-workers/P-tcp/P-udp/P-quic-routed-udp | yes |
+| FU-011 | implementation | 仅在 design 重新批准且 `CHG-dynamic-listeners` 实现准入通过后，删除 listener registry 与公开动态 listener 管理 API；相关验证归属后续 testing 阶段。 | P-dynamic-listeners/P-mixed-protocol-workers/P-quic-routed-udp | yes |
 | FU-012 | design | 将公开动态服务入口收敛为 `ServerRuntime`，并移除 server/listener config 对 worker 数量的所有权。 | P-server-runtime/P-workers/P-dynamic-listeners/P-mixed-protocol-workers | yes |
 | FU-013 | testing | 增加 `ServerRuntime` 共享 worker 配置和 server/listener config 不暴露 worker 设置的直接验证。 | P-server-runtime/P-workers/P-dynamic-listeners/P-mixed-protocol-workers | yes |
 | FU-014 | implementation | 在 `CHG-server-runtime` 实现准入通过后，迁移公开 API 与测试到 `ServerRuntime` 模型。 | P-server-runtime | yes |

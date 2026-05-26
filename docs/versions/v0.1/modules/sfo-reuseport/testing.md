@@ -4,7 +4,7 @@ submodule:
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-05-26T15:09:01Z
+approved_at: 2026-05-26T16:04:07Z
 ---
 
 # sfo-reuseport 测试
@@ -38,14 +38,14 @@ approved_at: 2026-05-26T15:09:01Z
 |--------|----------|------|----------|----------|----------------|------|----------------|
 | runtime feature gating | tokio 默认、async-std 可选、同时启用时报错。 | unit/dv | 默认 feature 可编译；async-std feature 可编译；双 runtime feature compile_fail。 | automated | `tests/unit/runtime_features.rs`、trybuild 或等价 compile-fail 测试 | ready | |
 | tokio-uring runtime feature | `runtime-tokio-uring` 互斥 feature、Linux cfg、公开 socket 类型和 handler API。 | unit/dv | tokio-uring feature 可在 Linux 下编译；与其他 runtime feature 互斥；公开 `TcpStream`/`UdpSocket` 类型可导入；tokio-uring all-targets 编译覆盖 handler 中使用 tokio-uring 风格 UDP send/recv 接口的类型边界。 | automated | `tests/unit/runtime_features.rs`、`cargo check --no-default-features --features runtime-tokio-uring --all-targets` via `test-run.py` dv | ready | 非 Linux 由 compile_error 边界覆盖，需要目标平台编译验证。 |
-| server runtime API | `ServerRuntime` 命名、共享 worker 配置、server/listener config 不含 worker 设置，以及单协议 server 入口只接受显式 runtime 并同步返回。 | unit/integration | `ServerRuntimeConfig` 可设置 worker；`ServiceConfig`/`ListenerConfig` 不暴露 worker 字段或 `with_workers`；`TcpServer`、`UdpServer`、`QuicServer` 不暴露 `serve_with_runtime` 或无 runtime 参数的 `serve`；`serve` 返回 `Result<(), Error>` 而不是 future，且生产代码不使用 `pending` 挂起；多个 TCP/UDP listener 注册到同一 runtime。 | automated | `tests/unit/server_runtime.rs`、`tests/unit/api_signatures.rs`、`tests/integration/dynamic_listeners.rs` | ready | |
+| server runtime API | `ServerRuntime` 命名、共享 worker 配置、server config 不含 worker 设置，以及单协议 server 入口只接受显式 runtime 并同步返回。 | unit/integration | `ServerRuntimeConfig` 可设置 worker；`ServiceConfig` 不暴露 worker 字段或 `with_workers`；`TcpServer`、`UdpServer`、`QuicServer` 不暴露 `serve_with_runtime` 或无 runtime 参数的 `serve`；`ServerRuntime` 不暴露 `add_tcp_listener`、`add_udp_listener`、`add_quic_listener` 或 `remove_listener`；crate 根不导出 `ListenerId`/`ListenerProtocol`；`serve` 返回 `Result<(), Error>` 而不是 future，且生产代码不使用 `pending` 挂起；多个 TCP/UDP listener 通过 `serve` 注册到同一 runtime。 | automated | `tests/unit/server_runtime.rs`、`tests/unit/api_signatures.rs`、`tests/integration/dynamic_listeners.rs` | ready | |
 | worker thread runtime | 每个 worker 对应独立 OS 线程，线程内运行单线程 async runtime。 | unit/integration | worker 启动路径使用 runtime worker-thread API；TCP/UDP listener loop 不直接使用调用方 runtime spawn 代表 worker。 | automated | `tests/unit/worker_runtime.rs`、`tests/integration/dynamic_listeners.rs` | ready | |
 | worker model | 默认 CPU 数、显式 worker 数、0 worker 配置错误、回调签名不含 worker id。 | unit | worker 数解析符合设计；公开 handler 类型不接收 worker id。 | automated | `tests/unit/worker_model.rs`、compile-time API tests | ready | |
 | Linux compatible scheduling | Dispatcher/DispatchPolicy 不公开，fallback 用户态路径使用 Linux 兼容内部调度。 | unit/integration | `ServerRuntimeConfig` 不暴露 dispatch 配置；crate 根不能导入 `DispatchPolicy`；内部调度对固定 TCP/UDP metadata 稳定选择 worker；fallback 路径不会调用用户自定义 selector。 | automated | `tests/unit/api_signatures.rs`、`tests/unit/schedule.rs`、`tests/integration/udp_serve.rs` | ready | |
 | socket options | `reuse_address`、IPv4 transparent mode、unsupported/permission-denied 错误分类。 | unit/dv | 配置转换和错误语义稳定，不允许覆盖内部 reuse-port/bind 状态。 | automated | `tests/unit/socket_options.rs`、`tests/dv/socket_options.rs` | ready | |
 | socket init callback | `ServiceConfig` 创建后回调的默认值、调用时机和错误传播。 | unit/dv | 默认 `None` 不改变配置；配置回调后 TCP/UDP bind 路径都会调用；回调错误阻止服务启动并保留错误信息。 | automated | `tests/unit/socket_init_callback.rs`、`tests/dv/socket_init_callback.rs` | ready | |
 | platform backend selection | Linux/BSD/Windows 后端 cfg 选择和统一错误类型。 | dv | 当前目标平台可编译；平台能力通过统一 `PlatformCapabilities` 表达。 | automated/manual | `tests/dv/platform_cfg.rs`；非当前 OS 由 CI matrix 或人工记录验证。 | manual | 单机无法覆盖所有 OS，需要 CI matrix 或人工在目标 OS 运行。 |
-| dynamic listeners | 服务运行期新增和删除 TCP/UDP listener。 | integration | 新增 listener 后可接收工作；删除 listener 后不再接收新工作；未知 listener id 返回明确错误。 | automated | `tests/integration/dynamic_listeners.rs` | ready | |
+| listener API surface | listener 动态新增/删除不作为公开 `ServerRuntime` API。 | unit/integration | `ServerRuntime` 不提供 `add_tcp_listener`、`add_udp_listener`、`add_quic_listener` 或 `remove_listener`；crate 根不导出 `ListenerId`/`ListenerProtocol`；TCP/UDP/QUIC-aware UDP listener 仍可通过 `serve` 注册并接收工作。 | automated | `tests/unit/api_signatures.rs`、`tests/unit/server_runtime.rs`、`tests/integration/dynamic_listeners.rs`、`tests/integration/quic_routed_udp.rs` | ready | |
 | mixed protocol workers | 一个 `ServerRuntime` 实例内 TCP 与 UDP listener 同时工作，并共享同一 worker 配置。 | integration | 同一 runtime 实例同时处理 TCP connection 与 UDP packet。 | automated | `tests/integration/dynamic_listeners.rs` | ready | |
 | QUIC routed UDP | `QuicServer` 按 QUIC DCID 前 2 字节 big-endian `u16` worker shard 稳定分配 UDP packet，不提供 QUIC 协议栈 API。 | unit/integration | long header 16-bit DCID worker shard 被解析；packet 投递到对应 worker；DCID 短于 2 字节、非法或缺失路由键不调用 handler。 | automated | `tests/unit/quic_routed_udp.rs`、`tests/integration/quic_routed_udp.rs` | ready | |
 | QUIC Linux reuse-port BPF selector | Linux 上 best-effort 优先附加 reuse-port eBPF selector，失败时退回 CBPF，再失败时保持用户态 QuicServer fallback。 | unit/dv/integration | eBPF 程序指令生成、`BPF_PROG_TYPE_SK_REUSEPORT` load 属性、`SO_ATTACH_REUSEPORT_EBPF` attach 路径、CBPF fallback 和 worker modulo 覆盖；当前平台编译覆盖平台 cfg；loopback integration 在 selector 可用或 fallback 时均保持稳定投递。 | automated/manual | `src/platform/mod.rs` 内部 unit、`tests/dv/platform_cfg.rs`、`tests/integration/quic_routed_udp.rs` | ready | 非 Linux 只能验证 fallback/cfg；内核拒绝 eBPF/CBPF 加载或附加时以 fallback 行为作为自动验证证据。 |
@@ -56,8 +56,8 @@ approved_at: 2026-05-26T15:09:01Z
 |------|------|----------|----------------|----------|----------------|------|----------------|
 | `TcpServer::serve` | 使用显式 `&ServerRuntime` 的同步 TCP listener 注册和 async 回调交付。 | `serve` 同步返回 `Result<(), Error>`；本地 loopback 多连接被 accept，handler 接收 runtime 原生 `TcpStream`。 | bind 失败、handler 返回错误；无 runtime 参数调用和 `serve_with_runtime` 不属于公开 API；生产 `serve` 代码不使用 `pending` 挂起。 | unit/integration | `tests/unit/api_signatures.rs`、`tests/integration/tcp_serve.rs` | ready | |
 | `UdpServer::serve` | 使用显式 `&ServerRuntime` 的同步 UDP listener 注册、packet 接收、metadata 和 handler 交付。 | `serve` 同步返回 `Result<(), Error>`；本地 loopback packet 到达 handler，handler 接收 runtime 原生 `UdpSocket`、`PacketMeta`、payload，并可用该 socket 发送响应。 | bind 失败、handler 返回错误；无 runtime 参数调用和 `serve_with_runtime` 不属于公开 API；`BalancedUdpSocket` 和 `DispatchPolicy` 不属于公开 API；生产 `serve` 代码不使用 `pending` 挂起。 | unit/integration | `tests/unit/api_signatures.rs`、`tests/integration/udp_serve.rs` | ready | |
-| UDP runtime socket API | UDP/QUIC handler 使用 runtime 原生 `UdpSocket`。 | API 编译测试确认 `UdpServer`、`QuicServer` 和动态 UDP listener handler 接收 `UdpSocket`；loopback 测试通过该 socket 发送响应。 | 编译期确认不能从 crate 根导入 `BalancedUdpSocket`。 | unit/integration | `tests/unit/api_signatures.rs`、`tests/integration/udp_serve.rs`、`tests/integration/quic_routed_udp.rs` | ready | |
-| `ServerRuntime` | 运行期 listener 管理和混合协议服务。 | `add_tcp_listener`、`add_udp_listener` 后可接收工作，`remove_listener` 后停止新工作。 | 删除未知 listener、删除后已交付工作不被强制中断、0 worker runtime 配置错误。 | unit/integration | `tests/unit/server_runtime.rs`、`tests/integration/dynamic_listeners.rs` | ready | |
+| UDP runtime socket API | UDP/QUIC handler 使用 runtime 原生 `UdpSocket`。 | API 编译测试确认 `UdpServer` 和 `QuicServer` handler 接收 `UdpSocket`；loopback 测试通过该 socket 发送响应。 | 编译期确认不能从 crate 根导入 `BalancedUdpSocket`。 | unit/integration | `tests/unit/api_signatures.rs`、`tests/integration/udp_serve.rs`、`tests/integration/quic_routed_udp.rs` | ready | |
+| `ServerRuntime` | 运行期 worker 所有权和混合协议服务。 | TCP/UDP/QUIC 通过 `serve` 后可接收工作；`ServerRuntime` 不公开 listener 动态管理方法。 | crate 根不导出 listener id 管理类型；0 worker runtime 配置错误。 | unit/integration | `tests/unit/server_runtime.rs`、`tests/unit/api_signatures.rs`、`tests/integration/dynamic_listeners.rs`、`tests/integration/quic_routed_udp.rs` | ready | |
 | `QuicServer` | 使用显式 `&ServerRuntime` 的同步 QUIC-aware UDP 包分配入口。 | `serve` 同步返回 `Result<(), Error>`；带可解析 16-bit DCID worker shard 的 UDP packet 被交付到对应 worker；Linux 可用时通过 reuse-port eBPF selector 预分配到 worker socket，eBPF 不可用时退回 CBPF 或用户态路由。 | 非法 packet、空 DCID、DCID 短于 2 字节或长度越界 packet 被丢弃；BPF 不可用时退回用户态路由；公开 API 不包含 TLS、connection、stream 配置、无 runtime 参数 `serve` 或 `serve_with_runtime`；生产 `serve` 代码不使用 `pending` 挂起。 | unit/integration | `tests/unit/api_signatures.rs`、`tests/unit/quic_routed_udp.rs`、`tests/integration/quic_routed_udp.rs` | ready | |
 | `examples/hyper_static.rs` | 展示上层 HTTP 协议如何接入 `TcpServer` 并服务静态文件。 | `--root` 指向临时目录时可返回普通文件和 `index.html`。 | 缺失文件返回 404；路径遍历和编码后的路径遍历返回 403；不改变 library API。 | dv | `harness/scripts/test-hyper-static-example.py` | ready | |
 | public error API | 统一错误语义，不要求调用方按平台分支。 | unsupported、permission-denied、invalid config、invalid worker index 可区分。 | 源错误保留但不泄漏平台 API 变体。 | unit | `tests/unit/error.rs` | ready | |
@@ -77,7 +77,7 @@ approved_at: 2026-05-26T15:09:01Z
 | CHG-platform-behavior | `design.md` | VAL-platform-current-target | dv | platform-current-target | no | |
 | CHG-socket-options | `design.md` | VAL-socket-options-unit | unit | socket-options-unit | no | |
 | CHG-socket-init-callback | `design.md` | VAL-socket-init-callback | unit | socket-init-callback | no | |
-| CHG-dynamic-listeners | `design.md` | VAL-dynamic-listeners | integration | dynamic-listeners | no | |
+| CHG-dynamic-listeners | `design.md` | VAL-listener-api-surface | unit | server-runtime-listener-api | no | |
 | CHG-mixed-protocol-workers | `design.md` | VAL-mixed-protocol-workers | integration | mixed-protocol-workers | no | |
 | CHG-quic-routed-udp | `design.md` | VAL-explicit-runtime-serve-api | unit | explicit-runtime-serve-api | no | 包含 QUIC route key parsing、worker 稳定投递、Linux reuse-port eBPF selector best-effort、CBPF fallback 和用户态 fallback 证据；DV step `quic-reuseport-bpf` 提供平台 selector 编译覆盖。 |
 | CHG-hyper-static-example | `design.md` | VAL-hyper-static-example | dv | hyper-static-example | no | |
@@ -87,7 +87,7 @@ approved_at: 2026-05-26T15:09:01Z
 |------------|----------|------------|----------------|
 | runtime feature 泄漏或双 runtime 同时启用。 | 默认 feature、async-std feature、双 feature compile-fail。 | 直接验证 Cargo feature 选择和公开类型隔离。 | |
 | tokio-uring runtime API 与现有 Send 模型不一致。 | Linux tokio-uring feature all-targets 编译、公开类型导入测试、tokio-uring feature 下 integration tests cfg 分离和 runtime adapter 编译。 | tokio-uring 原生 net 类型为 `!Send`/`!Sync`，因此验证重点是 adapter 将 socket future 创建和 poll 保留在 worker thread runtime 内，并且公开类型在该 feature 下可用。 | 非 Linux 运行行为不承诺，使用 compile_error 边界。 |
-| worker 数量必须属于 `ServerRuntime`。 | unit/API 测试断言 `ServerRuntimeConfig` 拥有 worker 配置，`ServiceConfig`/`ListenerConfig` 不支持 worker 设置；integration test 在同一 `ServerRuntime` 中注册 TCP/UDP listener。 | 公开 API 表面和运行期混合 listener 行为共同证明 worker 配置在 runtime 层共享。 | |
+| worker 数量必须属于 `ServerRuntime`。 | unit/API 测试断言 `ServerRuntimeConfig` 拥有 worker 配置，`ServiceConfig` 不支持 worker 设置；integration test 通过 `serve` 在同一 `ServerRuntime` 中注册 TCP/UDP listener。 | 公开 API 表面和运行期混合 listener 行为共同证明 worker 配置在 runtime 层共享。 | |
 | 单协议 server 入口必须显式复用 `ServerRuntime` 且同步返回。 | API 测试使用 `TcpServer::serve(&runtime, ...)`、`UdpServer::serve(&runtime, ...)`、`QuicServer::serve(&runtime, ...)` 并把返回值约束为 `Result<(), Error>`；源码检查阻止 `pub async fn serve`、`serve_with_runtime` 和生产 `pending` 重新出现。 | 公开入口签名是需求边界；编译期调用和符号搜索能直接发现隐式 runtime convenience API、异步 serve 或 pending lifecycle future 回归。 | |
 | 每个 worker 必须运行在独立线程和单线程 async runtime 内。 | worker runtime unit test 和 listener integration test；代码搜索确认 worker loop 不通过 `runtime::spawn` 直接放入调用方 runtime。 | worker 启动 API 是该实现边界的集中点，integration test 覆盖该路径下 TCP/UDP listener 可工作。 | |
 | worker id 不应暴露给用户回调。 | compile-time API 测试使用不含 worker id 的 handler，并用负例阻止含 worker id 的签名。 | 公开签名是该需求的契约边界，编译期验证最直接。 | |
@@ -97,7 +97,7 @@ approved_at: 2026-05-26T15:09:01Z
 | 平台差异不进入公开 API。 | 当前目标 DV 编译、平台能力 unit tests、OS matrix/manual 验证。 | 当前目标可自动验证；非当前 OS 需要矩阵或人工环境。 | 单机无法覆盖全部 OS。 |
 | socket options 不能破坏 balancer 状态。 | 配置 unit tests 和 DV socket setup tests。 | 验证受控配置、错误分类和禁止 raw escape hatch 的 API 表面。 | transparent 特权路径需 manual。 |
 | socket 创建后回调可能改变启动路径或吞掉错误。 | unit 测试断言默认 `None`、builder API 和错误枚举；DV 测试通过 TCP/UDP bind 入口观察回调调用与错误传播。 | 回调行为集中在 `ServiceConfig` 和平台 bind 路径，unit/DV 可以直接覆盖不启动完整长生命周期服务的关键边界。 | |
-| 动态 listener 删除语义不清。 | integration test 先新增 listener 并验证工作交付，再删除 listener 并验证后续连接或数据包不再交付。 | 覆盖 add/remove registry、停止信号和本地 wake-up 的可观察行为。 | |
+| listener 动态管理 API 误暴露。 | unit/API 测试断言 `ServerRuntime` 不公开 `add_tcp_listener`、`add_udp_listener`、`add_quic_listener` 和 `remove_listener`，crate 根不导出 `ListenerId`/`ListenerProtocol`；integration test 通过三个 `serve` 入口证明 listener 仍可注册并处理工作。 | 同时覆盖公开 API 收窄和保留的 TCP/UDP/QUIC-aware UDP 服务能力。 | |
 | TCP 与 UDP 必须共享同一服务实例。 | integration test 在一个 `ServerRuntime` 上同时注册 TCP 与 UDP listener 并观察两个 handler。 | 直接验证混合协议入口和共享 worker 配置。 | |
 | `QuicServer` 不能变成 QUIC 协议栈。 | API 编译测试只使用 UDP packet handler；测试中不存在 TLS、connection、stream 配置入口。 | 公开接口和测试输入共同证明本 crate 只负责 packet routing。 | |
 | QUIC 路由字段来自不可信网络输入。 | unit 测试覆盖短包、空 DCID、1 字节 DCID、长度越界、eBPF selector 指令生成和 fallback 选择；integration 测试覆盖合法 long header 16-bit DCID worker shard。 | 长度检查和丢弃语义是防 panic 和防错误 handler 调用的直接边界；1 字节 DCID 负例强制外部遵守 16-bit layout；eBPF/CBPF 只作为内核预分配优化，自动测试允许当前内核拒绝后走 fallback。 | |
@@ -109,7 +109,7 @@ approved_at: 2026-05-26T15:09:01Z
 | runtime default feature | 默认 `runtime-tokio` 可编译，公开 runtime type aliases 指向 tokio。 | `tests/unit/runtime_features.rs` |
 | tokio-uring runtime feature | `runtime-tokio-uring` 下公开 runtime socket 类型可导入，Send 断言按 tokio-uring `!Send` 原生边界关闭。 | `tests/unit/runtime_features.rs` |
 | runtime mutual exclusion | 同时启用 `runtime-tokio` 与 `runtime-async-std` 编译失败。 | `tests/unit/runtime_features.rs` 或 trybuild fixtures |
-| server runtime API | `ServerRuntimeConfig`、`ListenerConfig`、`ListenerId`、未知 listener 错误，以及 server/listener config 不含 worker 设置。 | `tests/unit/server_runtime.rs` |
+| server runtime API | `ServerRuntimeConfig`、listener 动态管理符号不公开，以及 server config 不含 worker 设置。 | `tests/unit/server_runtime.rs` |
 | worker thread runtime | worker thread runtime 启动 API 和多 worker listener loop 路径。 | `tests/unit/worker_runtime.rs` |
 | worker model | `WorkerCount::Default`、显式 worker 数和 0 worker runtime 配置错误。 | `tests/unit/worker_model.rs` |
 | callback signatures and server entrypoints | TCP/UDP/QUIC handler 不包含 worker id；`TcpServer`、`UdpServer`、`QuicServer` 只通过显式 `&ServerRuntime` 的同步 `serve` 调用，返回 `Result<(), Error>`，生产代码不使用 `pending` 挂起。 | `tests/unit/api_signatures.rs` |
@@ -140,7 +140,7 @@ approved_at: 2026-05-26T15:09:01Z
 | TCP error paths | bind 失败、handler 错误、invalid config。 | `tests/integration/tcp_serve.rs` |
 | UDP loopback serve | packet receive、metadata、runtime 原生 `UdpSocket` response path。 | `tests/integration/udp_serve.rs` |
 | UDP error paths | bind 失败和 handler 错误；UDP 服务不依赖公开 dispatch 配置。 | `tests/integration/udp_serve.rs` |
-| dynamic listener lifecycle | 运行中新增 TCP/UDP listener、删除 listener、删除未知 listener。 | `tests/integration/dynamic_listeners.rs` |
+| listener API surface | TCP/UDP/QUIC `serve` listener 注册，以及 `add_tcp_listener`/`add_udp_listener`/`add_quic_listener`/`remove_listener`/`ListenerId` 不公开。 | `tests/unit/api_signatures.rs`、`tests/unit/server_runtime.rs`、`tests/integration/dynamic_listeners.rs`、`tests/integration/quic_routed_udp.rs` |
 | mixed protocol runtime service | 同一 `ServerRuntime` 实例同时处理 TCP 与 UDP listener。 | `tests/integration/dynamic_listeners.rs` |
 | QUIC routed UDP worker stability | `QuicServer` 将带 DCID worker shard 的 packet 投递到对应 worker。 | `tests/integration/quic_routed_udp.rs` |
 | QUIC routed UDP BPF fallback | Linux BPF selector 可用时经每 worker socket 投递；不可用或非 Linux 时经用户态 fallback 仍稳定投递。 | `tests/integration/quic_routed_udp.rs` |
@@ -163,13 +163,13 @@ approved_at: 2026-05-26T15:09:01Z
 |--------------|----------|------|------------|------|
 | FU-TEST-001 | testing | 按本测试计划创建或维护对应 unit/dv/integration 测试文件，并确保它们可通过统一测试入口执行。 | 全部自动测试项 | yes |
 | FU-TEST-004 | acceptance | 实现后审计 manual 验证结果和自动测试结果。 | platform OS matrix、transparent privileged path | yes |
-| FU-TEST-005 | testing | 按新增动态 listener 和混合协议 worker 验证项创建 unit/integration 测试文件并通过 canonical test entry。 | dynamic listeners、mixed protocol workers | yes |
+| FU-TEST-005 | testing | 按 listener API 表面和混合协议 worker 验证项维护 unit/integration 测试文件并通过 canonical test entry。 | listener API surface、mixed protocol workers | yes |
 | FU-TEST-006 | testing | 按 `ServerRuntime` 模型更新公开 API 测试和集成测试，确保 worker 配置不再位于 server/listener config。 | server runtime API | yes |
-| FU-TEST-007 | testing | 增加 worker thread runtime 测试，覆盖 TCP/UDP/dynamic listener loop 已迁移到 worker thread runtime 启动路径。 | worker thread runtime | yes |
+| FU-TEST-007 | testing | 增加 worker thread runtime 测试，覆盖 TCP/UDP `serve` listener loop 已迁移到 worker thread runtime 启动路径。 | worker thread runtime | yes |
 | FU-TEST-008 | testing | 增加 `ServiceConfig` socket 创建后回调测试，覆盖默认 `None`、TCP/UDP 调用路径与错误传播。 | socket init callback | yes |
 | FU-TEST-009 | testing | 增加 `QuicServer` 测试，覆盖 QUIC route key parsing、稳定 worker 投递、Linux reuse-port BPF selector best-effort 路径、fallback 和非法 packet 丢弃。 | QUIC routed UDP | yes |
 | FU-TEST-010 | testing | 更新公开 API 测试、loopback integration tests 和示例验证，确保 `TcpServer`、`UdpServer`、`QuicServer` 只使用 `serve(&ServerRuntime, ServiceConfig, handler)`。 | explicit runtime serve API | yes |
-| FU-TEST-011 | testing | 更新 API signature、UDP loopback、QUIC routed UDP、dynamic listener 测试到 runtime 原生 `UdpSocket` handler，并确认 `BalancedUdpSocket` 不再公开。 | UDP runtime socket API | yes |
+| FU-TEST-011 | testing | 更新 API signature、UDP loopback 和 QUIC routed UDP 测试到 runtime 原生 `UdpSocket` handler，并确认 `BalancedUdpSocket` 不再公开。 | UDP runtime socket API | yes |
 | FU-TEST-012 | testing | 删除 Dispatcher/DispatchPolicy 相关策略测试和 custom dispatcher 集成测试，新增内部 schedule 单元测试与公开 API 负例。 | Linux compatible scheduling | yes |
 | FU-TEST-013 | acceptance | tokio-uring runtime feature 实现后审计 feature 互斥、Linux cfg、公开 socket 类型和测试入口证据。 | tokio-uring runtime feature | yes |
 | FU-TEST-014 | acceptance | hyper 静态文件服务器示例实现后审计 proposal、design、示例代码、Cargo 依赖和 smoke 验证是否一致。 | hyper static example | yes |

@@ -78,35 +78,6 @@ impl ServerRuntimeConfig {
     }
 }
 
-#[derive(Clone)]
-pub struct ListenerConfig {
-    pub bind_addr: SocketAddr,
-    pub socket_options: SocketOptions,
-}
-
-impl ListenerConfig {
-    pub fn new(bind_addr: SocketAddr) -> Self {
-        Self {
-            bind_addr,
-            socket_options: SocketOptions::default(),
-        }
-    }
-
-    pub fn with_socket_options(mut self, socket_options: SocketOptions) -> Self {
-        self.socket_options = socket_options;
-        self
-    }
-}
-
-impl From<ServiceConfig> for ListenerConfig {
-    fn from(config: ServiceConfig) -> Self {
-        Self {
-            bind_addr: config.bind_addr,
-            socket_options: config.socket_options,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerCount {
     Default,

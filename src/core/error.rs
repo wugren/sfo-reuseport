@@ -9,7 +9,6 @@ pub enum Error {
     SocketInitCallback(String),
     Socket(io::Error),
     Runtime(String),
-    UnknownListener,
     Handler(String),
 }
 
@@ -36,7 +35,6 @@ impl fmt::Display for Error {
             }
             Self::Socket(error) => write!(f, "socket error: {error}"),
             Self::Runtime(message) => write!(f, "runtime error: {message}"),
-            Self::UnknownListener => write!(f, "unknown listener"),
             Self::Handler(message) => write!(f, "handler error: {message}"),
         }
     }

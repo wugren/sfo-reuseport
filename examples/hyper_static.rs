@@ -1,12 +1,7 @@
-#[cfg(feature = "runtime-tokio")]
 use std::env;
-#[cfg(feature = "runtime-tokio")]
 use std::io;
-#[cfg(feature = "runtime-tokio")]
 use std::net::SocketAddr;
-#[cfg(feature = "runtime-tokio")]
 use std::path::{Component, PathBuf};
-#[cfg(feature = "runtime-tokio")]
 use std::sync::Arc;
 
 #[cfg(feature = "runtime-tokio")]
@@ -25,7 +20,6 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 #[cfg(feature = "runtime-tokio")]
 use hyper_util::rt::TokioIo;
-#[cfg(feature = "runtime-tokio")]
 use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer};
 
 #[cfg(feature = "runtime-tokio")]
@@ -34,6 +28,22 @@ type Body = Full<Bytes>;
 #[cfg(feature = "runtime-tokio")]
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    run_hyper().await
+}
+
+#[cfg(feature = "runtime-async-std")]
+#[async_std::main]
+async fn main() -> Result<(), Error> {
+    run_plain().await
+}
+
+#[cfg(feature = "runtime-tokio-uring")]
+fn main() -> Result<(), Error> {
+    tokio_uring::start(run_plain())
+}
+
+#[cfg(feature = "runtime-tokio")]
+async fn run_hyper() -> Result<(), Error> {
     let args = Args::parse()?;
     let root = Arc::new(canonical_root(args.root)?);
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new())?;
@@ -54,16 +64,27 @@ async fn main() -> Result<(), Error> {
     std::future::pending::<Result<(), Error>>().await
 }
 
-#[cfg(not(feature = "runtime-tokio"))]
-fn main() {}
+#[cfg(any(feature = "runtime-async-std", feature = "runtime-tokio-uring"))]
+async fn run_plain() -> Result<(), Error> {
+    let args = Args::parse()?;
+    let root = Arc::new(canonical_root(args.root)?);
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new())?;
+    let config = ServiceConfig::new(args.addr);
 
-#[cfg(feature = "runtime-tokio")]
+    eprintln!("serving {} at http://{}", root.display(), args.addr);
+
+    TcpServer::serve(&runtime, config, move |stream| {
+        let root = Arc::clone(&root);
+        async move { serve_plain_connection(root, stream).await }
+    })?;
+    std::future::pending::<Result<(), Error>>().await
+}
+
 struct Args {
     addr: SocketAddr,
     root: PathBuf,
 }
 
-#[cfg(feature = "runtime-tokio")]
 impl Args {
     fn parse() -> Result<Self, Error> {
         let mut addr = "127.0.0.1:8080"
@@ -104,12 +125,10 @@ impl Args {
     }
 }
 
-#[cfg(feature = "runtime-tokio")]
 fn print_usage() {
     println!("Usage: cargo run --example hyper_static -- [--root <path>] [--addr <addr>]");
 }
 
-#[cfg(feature = "runtime-tokio")]
 fn canonical_root(root: PathBuf) -> Result<PathBuf, Error> {
     let root = root.canonicalize().map_err(|error| {
         Error::InvalidConfig(format!("static root `{}` is invalid: {error}", root.display()))
@@ -121,6 +140,131 @@ fn canonical_root(root: PathBuf) -> Result<PathBuf, Error> {
         )));
     }
     Ok(root)
+}
+
+#[cfg(any(feature = "runtime-async-std", feature = "runtime-tokio-uring"))]
+async fn serve_plain_connection(
+    root: Arc<PathBuf>,
+    stream: sfo_reuseport::TcpStream,
+) -> Result<(), Error> {
+    let request = read_request(&stream).await?;
+    if request.is_empty() {
+        return Ok(());
+    }
+    let response = plain_response_for_request(&root, &request);
+    write_response(&stream, response).await
+}
+
+#[cfg(feature = "runtime-async-std")]
+async fn read_request(stream: &sfo_reuseport::TcpStream) -> Result<Vec<u8>, Error> {
+    use async_std::io::ReadExt;
+
+    let mut stream = stream;
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    while request.len() <= 8192 {
+        let len = stream.read(&mut buffer).await?;
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        request.extend_from_slice(&buffer[..len]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(request);
+        }
+    }
+    Err(Error::Handler("http request headers were not complete".to_string()))
+}
+
+#[cfg(feature = "runtime-tokio-uring")]
+async fn read_request(stream: &sfo_reuseport::TcpStream) -> Result<Vec<u8>, Error> {
+    let mut request = Vec::new();
+    while request.len() <= 8192 {
+        let buffer = vec![0_u8; 1024];
+        let (result, buffer) = stream.read(buffer).await;
+        let len = result?;
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        request.extend_from_slice(&buffer[..len]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(request);
+        }
+    }
+    Err(Error::Handler("http request headers were not complete".to_string()))
+}
+
+#[cfg(any(feature = "runtime-async-std", feature = "runtime-tokio-uring"))]
+fn plain_response_for_request(root: &PathBuf, request: &[u8]) -> Vec<u8> {
+    let request = String::from_utf8_lossy(request);
+    let Some(request_line) = request.lines().next() else {
+        return plain_response(400, "Bad Request", "text/plain; charset=utf-8", b"bad request");
+    };
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let path = parts.next().unwrap_or_default();
+    if method != "GET" && method != "HEAD" {
+        return plain_response(
+            405,
+            "Method Not Allowed",
+            "text/plain; charset=utf-8",
+            b"method not allowed",
+        );
+    }
+
+    let headers_only = method == "HEAD";
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    let path = match resolve_path(root, path) {
+        Ok(path) => path,
+        Err(ResolveError::Forbidden) => {
+            return plain_response(403, "Forbidden", "text/plain; charset=utf-8", b"forbidden");
+        }
+        Err(ResolveError::NotFound) => {
+            return plain_response(404, "Not Found", "text/plain; charset=utf-8", b"not found");
+        }
+    };
+
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let body = if headers_only { Vec::new() } else { bytes };
+            plain_response(200, "OK", content_type_str(&path), &body)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            plain_response(404, "Not Found", "text/plain; charset=utf-8", b"not found")
+        }
+        Err(_) => plain_response(
+            500,
+            "Internal Server Error",
+            "text/plain; charset=utf-8",
+            b"internal server error",
+        ),
+    }
+}
+
+#[cfg(any(feature = "runtime-async-std", feature = "runtime-tokio-uring"))]
+fn plain_response(status: u16, reason: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
+    let mut response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(body);
+    response
+}
+
+#[cfg(feature = "runtime-async-std")]
+async fn write_response(stream: &sfo_reuseport::TcpStream, response: Vec<u8>) -> Result<(), Error> {
+    use async_std::io::WriteExt;
+
+    let mut stream = stream;
+    stream.write_all(&response).await?;
+    Ok(())
+}
+
+#[cfg(feature = "runtime-tokio-uring")]
+async fn write_response(stream: &sfo_reuseport::TcpStream, response: Vec<u8>) -> Result<(), Error> {
+    let (result, _response) = stream.write_all(response).await;
+    result?;
+    Ok(())
 }
 
 #[cfg(feature = "runtime-tokio")]
@@ -162,7 +306,6 @@ async fn response_for_path(root: &PathBuf, uri_path: &str, headers_only: bool) -
     }
 }
 
-#[cfg(feature = "runtime-tokio")]
 fn resolve_path(root: &PathBuf, uri_path: &str) -> Result<PathBuf, ResolveError> {
     let mut candidate = root.clone();
 
@@ -209,7 +352,6 @@ fn resolve_path(root: &PathBuf, uri_path: &str) -> Result<PathBuf, ResolveError>
     Ok(canonical)
 }
 
-#[cfg(feature = "runtime-tokio")]
 fn percent_decode(segment: &str) -> Result<String, ResolveError> {
     let bytes = segment.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -233,7 +375,6 @@ fn percent_decode(segment: &str) -> Result<String, ResolveError> {
     String::from_utf8(decoded).map_err(|_| ResolveError::Forbidden)
 }
 
-#[cfg(feature = "runtime-tokio")]
 fn from_hex(byte: u8) -> Result<u8, ResolveError> {
     match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
@@ -255,26 +396,29 @@ fn text_response(status: StatusCode, message: &'static str) -> Response<Body> {
 
 #[cfg(feature = "runtime-tokio")]
 fn content_type(path: &std::path::Path) -> HeaderValue {
+    HeaderValue::from_static(content_type_str(path))
+}
+
+fn content_type_str(path: &std::path::Path) -> &'static str {
     match path.extension().and_then(|extension| extension.to_str()) {
-        Some("html" | "htm") => HeaderValue::from_static("text/html; charset=utf-8"),
-        Some("css") => HeaderValue::from_static("text/css; charset=utf-8"),
-        Some("js") => HeaderValue::from_static("application/javascript"),
-        Some("json") => HeaderValue::from_static("application/json"),
-        Some("png") => HeaderValue::from_static("image/png"),
-        Some("jpg" | "jpeg") => HeaderValue::from_static("image/jpeg"),
-        Some("gif") => HeaderValue::from_static("image/gif"),
-        Some("svg") => HeaderValue::from_static("image/svg+xml"),
-        Some("txt") => HeaderValue::from_static("text/plain; charset=utf-8"),
-        Some("toml") => HeaderValue::from_static("text/plain; charset=utf-8"),
-        Some("md") => HeaderValue::from_static("text/plain; charset=utf-8"),
-        Some("yaml") => HeaderValue::from_static("text/plain; charset=utf-8"),
-        Some("bat") => HeaderValue::from_static("text/plain; charset=utf-8"),
-        Some("sh") => HeaderValue::from_static("text/plain; charset=utf-8"),
-        _ => HeaderValue::from_static("application/octet-stream"),
+        Some("html" | "htm") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "application/javascript",
+        Some("json") => "application/json",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("toml") => "text/plain; charset=utf-8",
+        Some("md") => "text/plain; charset=utf-8",
+        Some("yaml") => "text/plain; charset=utf-8",
+        Some("bat") => "text/plain; charset=utf-8",
+        Some("sh") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
     }
 }
 
-#[cfg(feature = "runtime-tokio")]
 #[derive(Debug)]
 enum ResolveError {
     Forbidden,

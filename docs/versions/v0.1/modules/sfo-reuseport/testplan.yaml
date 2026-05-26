@@ -71,7 +71,7 @@ levels:
         change_ids: ["CHG-socket-init-callback"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: server-runtime-listener-api
-        name: ServerRuntime listener 标识和错误语义
+        name: ServerRuntime listener 动态管理 API 缺失契约
         change_ids: ["CHG-server-runtime", "CHG-dynamic-listeners", "CHG-mixed-protocol-workers"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: quic-route-key-parsing
@@ -159,7 +159,7 @@ levels:
         change_ids: ["CHG-udp-runtime-socket", "CHG-worker-model", "CHG-worker-thread-runtime", "CHG-runtime-features"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: dynamic-listeners
-        name: 运行期新增和删除 TCP/UDP listener
+        name: TCP/UDP/QUIC serve 注册和 listener 动态管理 API 不公开
         change_ids: ["CHG-dynamic-listeners", "CHG-tcp-serve", "CHG-udp-runtime-socket"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: mixed-protocol-workers

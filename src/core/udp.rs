@@ -3,8 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::core::{
-    Error, HandlerFuture, HandlerFutureBox, ListenerConfig, ListenerId, ListenerProtocol,
-    ServerRuntime, ServiceConfig, linux_reuseport_select,
+    Error, HandlerFuture, HandlerFutureBox, ServerRuntime, ServiceConfig, linux_reuseport_select,
 };
 use crate::platform;
 use crate::runtime::{self, UdpSocket};
@@ -39,55 +38,22 @@ impl UdpServer {
     }
 }
 
-impl ServerRuntime {
-    pub fn add_udp_listener<F, Fut>(
-        &self,
-        config: ListenerConfig,
-        handler: F,
-    ) -> Result<ListenerId, Error>
-    where
-        F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
-        Fut: HandlerFuture,
-    {
-        add_udp_listener(self, config, handler)
-    }
-}
-
-pub(crate) fn add_udp_listener<F, Fut>(
-    runtime: &ServerRuntime,
-    config: ListenerConfig,
-    handler: F,
-) -> Result<ListenerId, Error>
-where
-    F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
-    Fut: HandlerFuture,
-{
-    let service_config = runtime.service_config(config);
-    service_config.validate()?;
-    if !platform::supports_reuse_port_balancing() {
-        return add_simulated_listener(runtime, service_config, handler);
-    }
-
-    add_reuse_port_listener(runtime, service_config, handler)
-}
-
 fn add_reuse_port_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
-) -> Result<ListenerId, Error>
+) -> Result<(), Error>
 where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
 {
     let sockets = platform::bind_udp_workers(&service_config, runtime.worker_count())?;
-    let addr = sockets
-        .first()
-        .ok_or_else(|| Error::InvalidConfig("worker count must be greater than zero".to_string()))?
-        .local_addr()
-        .map_err(Error::from)?;
-    let active = Arc::new(AtomicBool::new(true));
-    let id = runtime.register_listener(ListenerProtocol::Udp, addr, Arc::clone(&active))?;
+    if sockets.is_empty() {
+        return Err(Error::InvalidConfig(
+            "worker count must be greater than zero".to_string(),
+        ));
+    }
+    let active = runtime.active_flag();
 
     let handler = udp_handler(handler);
     for (worker_id, socket) in sockets.into_iter().enumerate() {
@@ -101,14 +67,14 @@ where
         })?;
     }
 
-    Ok(id)
+    Ok(())
 }
 
 fn add_simulated_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
-) -> Result<ListenerId, Error>
+) -> Result<(), Error>
 where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
@@ -120,12 +86,10 @@ where
     }
 
     let socket = platform::bind_udp(&service_config)?;
-    let addr = socket.local_addr().map_err(Error::from)?;
-    let active = Arc::new(AtomicBool::new(true));
-    let id = runtime.register_listener(ListenerProtocol::Udp, addr, Arc::clone(&active))?;
+    let active = runtime.active_flag();
 
-    let server_runtime = runtime.clone();
-    let worker_count = server_runtime.worker_count();
+    let worker_executors = runtime.worker_executors();
+    let worker_count = worker_executors.len();
     let handler = udp_handler(handler);
     runtime.submit_to_worker(0, move || async move {
         let Ok(socket) = runtime::udp_socket_from_std(socket).map_err(Error::from) else {
@@ -134,14 +98,14 @@ where
         simulated_udp_listener_loop(
             socket,
             active,
-            server_runtime,
+            worker_executors,
             worker_count,
             handler,
         )
         .await;
     })?;
 
-    Ok(id)
+    Ok(())
 }
 
 pub struct QuicServer;
@@ -162,39 +126,11 @@ impl QuicServer {
     }
 }
 
-impl ServerRuntime {
-    pub fn add_quic_listener<F, Fut>(
-        &self,
-        config: ListenerConfig,
-        handler: F,
-    ) -> Result<ListenerId, Error>
-    where
-        F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
-        Fut: HandlerFuture,
-    {
-        add_quic_listener(self, config, handler)
-    }
-}
-
-pub(crate) fn add_quic_listener<F, Fut>(
-    runtime: &ServerRuntime,
-    config: ListenerConfig,
-    handler: F,
-) -> Result<ListenerId, Error>
-where
-    F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
-    Fut: HandlerFuture,
-{
-    let service_config = runtime.service_config(config);
-    service_config.validate()?;
-    add_quic_routed_listener(runtime, service_config, handler)
-}
-
 fn add_quic_routed_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
-) -> Result<ListenerId, Error>
+) -> Result<(), Error>
 where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
@@ -210,13 +146,13 @@ fn add_quic_reuseport_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
-) -> Result<ListenerId, Error>
+) -> Result<(), Error>
 where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
 {
-    if let Some(listener) = add_quic_reuseport_bpf_listener(runtime, &service_config, handler.clone())? {
-        return Ok(listener);
+    if add_quic_reuseport_bpf_listener(runtime, &service_config, handler.clone())? {
+        return Ok(());
     }
 
     add_quic_simulated_listener(runtime, service_config, handler)
@@ -226,7 +162,7 @@ fn add_quic_simulated_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
-) -> Result<ListenerId, Error>
+) -> Result<(), Error>
 where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
@@ -238,28 +174,26 @@ where
     }
 
     let socket = platform::bind_udp(&service_config)?;
-    let addr = socket.local_addr().map_err(Error::from)?;
-    let active = Arc::new(AtomicBool::new(true));
-    let id = runtime.register_listener(ListenerProtocol::Udp, addr, Arc::clone(&active))?;
+    let active = runtime.active_flag();
 
-    let server_runtime = runtime.clone();
-    let worker_count = server_runtime.worker_count();
+    let worker_executors = runtime.worker_executors();
+    let worker_count = worker_executors.len();
     let handler = udp_handler(handler);
     runtime.submit_to_worker(0, move || async move {
         let Ok(socket) = runtime::udp_socket_from_std(socket).map_err(Error::from) else {
             return;
         };
-        quic_routed_udp_listener_loop(socket, active, server_runtime, worker_count, handler).await;
+        quic_routed_udp_listener_loop(socket, active, worker_executors, worker_count, handler).await;
     })?;
 
-    Ok(id)
+    Ok(())
 }
 
 fn add_quic_reuseport_bpf_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: &ServiceConfig,
     handler: F,
-) -> Result<Option<ListenerId>, Error>
+) -> Result<bool, Error>
 where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
@@ -267,15 +201,14 @@ where
     let Some(sockets) =
         platform::bind_quic_udp_reuseport_workers(service_config, runtime.worker_count())?
     else {
-        return Ok(None);
+        return Ok(false);
     };
-    let addr = sockets
-        .first()
-        .ok_or_else(|| Error::InvalidConfig("worker count must be greater than zero".to_string()))?
-        .local_addr()
-        .map_err(Error::from)?;
-    let active = Arc::new(AtomicBool::new(true));
-    let id = runtime.register_listener(ListenerProtocol::Udp, addr, Arc::clone(&active))?;
+    if sockets.is_empty() {
+        return Err(Error::InvalidConfig(
+            "worker count must be greater than zero".to_string(),
+        ));
+    }
+    let active = runtime.active_flag();
 
     let handler = udp_handler(handler);
     for (worker_id, socket) in sockets.into_iter().enumerate() {
@@ -290,7 +223,7 @@ where
         })?;
     }
 
-    Ok(Some(id))
+    Ok(true)
 }
 
 fn udp_handler<F, Fut>(handler: F) -> UdpHandler
@@ -307,7 +240,7 @@ where
 async fn quic_routed_udp_listener_loop(
     socket: UdpSocket,
     active: Arc<AtomicBool>,
-    runtime: ServerRuntime,
+    worker_executors: Vec<runtime::ExecutorHandle>,
     worker_count: usize,
     handler: UdpHandler,
 ) {
@@ -333,8 +266,10 @@ async fn quic_routed_udp_listener_loop(
         let handler = Arc::clone(&handler);
         let socket = socket.clone();
         let payload = payload.to_vec();
-        let submit_result =
-            submit_udp_handler(&runtime, worker_id, socket, meta, payload, handler).await;
+        let Some(executor) = worker_executors.get(worker_id) else {
+            break;
+        };
+        let submit_result = submit_udp_handler(executor, socket, meta, payload, handler).await;
         if submit_result.is_err() {
             break;
         }
@@ -440,7 +375,7 @@ async fn udp_listener_loop(
 async fn simulated_udp_listener_loop(
     socket: UdpSocket,
     active: Arc<AtomicBool>,
-    runtime: ServerRuntime,
+    worker_executors: Vec<runtime::ExecutorHandle>,
     worker_count: usize,
     handler: UdpHandler,
 ) {
@@ -465,8 +400,10 @@ async fn simulated_udp_listener_loop(
         let handler = Arc::clone(&handler);
         let socket = socket.clone();
         let payload = buffer[..len].to_vec();
-        let submit_result =
-            submit_udp_handler(&runtime, worker_id, socket, meta, payload, handler).await;
+        let Some(executor) = worker_executors.get(worker_id) else {
+            break;
+        };
+        let submit_result = submit_udp_handler(executor, socket, meta, payload, handler).await;
         if submit_result.is_err() {
             break;
         }
@@ -474,14 +411,12 @@ async fn simulated_udp_listener_loop(
 }
 
 async fn submit_udp_handler(
-    runtime: &ServerRuntime,
-    worker_id: usize,
+    executor: &runtime::ExecutorHandle,
     socket: UdpSocket,
     meta: PacketMeta,
     payload: Vec<u8>,
     handler: UdpHandler,
 ) -> Result<(), Error> {
-    let executor = runtime.worker_executor(worker_id)?;
     let task_socket = socket.clone();
     let task_payload = payload.clone();
     let task_handler = Arc::clone(&handler);

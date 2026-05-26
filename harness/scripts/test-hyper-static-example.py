@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import http.client
 import socket
 import subprocess
@@ -10,6 +11,9 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+
+RUNTIMES = ("runtime-tokio", "runtime-async-std", "runtime-tokio-uring")
 
 
 def free_port() -> int:
@@ -41,20 +45,29 @@ def request(port: int, path: str) -> tuple[int, bytes]:
         connection.close()
 
 
+def feature_args(runtime: str) -> list[str]:
+    return ["--no-default-features", "--features", runtime]
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--runtime", choices=RUNTIMES, default="runtime-tokio")
+    args = parser.parse_args()
+
     root = Path.cwd()
     port = free_port()
 
     with tempfile.TemporaryDirectory(prefix="sfo-reuseport-static-") as directory:
         static_root = Path(directory)
-        (static_root / "hello.txt").write_text("hello from static example\n", encoding="utf-8")
-        (static_root / "index.html").write_text("<h1>index</h1>\n", encoding="utf-8")
+        (static_root / "hello.txt").write_bytes(b"hello from static example\n")
+        (static_root / "index.html").write_bytes(b"<h1>index</h1>\n")
 
         process = subprocess.Popen(
             [
                 "cargo",
                 "run",
                 "--quiet",
+                *feature_args(args.runtime),
                 "--example",
                 "hyper_static",
                 "--",
@@ -102,7 +115,7 @@ def main() -> int:
             if process.returncode not in (0, -15, 143):
                 print(stderr, file=sys.stderr)
 
-    print("hyper_static example smoke test passed")
+    print(f"hyper_static example smoke test passed for {args.runtime}")
     return 0
 
 

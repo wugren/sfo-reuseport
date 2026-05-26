@@ -2,9 +2,7 @@ use std::net::UdpSocket as StdUdpSocket;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use sfo_reuseport::{
-    Error, ListenerConfig, QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig,
-};
+use sfo_reuseport::{Error, QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig};
 
 fn free_addr() -> std::net::SocketAddr {
     let socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
@@ -50,8 +48,9 @@ async fn quic_routed_udp_delivers_long_header_dcid_to_target_worker() {
     let seen_worker = Arc::new(Mutex::new(None));
     let handler_seen_worker = Arc::clone(&seen_worker);
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(3)).unwrap();
-    let listener = runtime.add_quic_listener(
-        ListenerConfig::new(addr),
+    QuicServer::serve(
+        &runtime,
+        ServiceConfig::new(addr),
         move |socket, meta, _payload| {
             let handler_seen_worker = Arc::clone(&handler_seen_worker);
             async move {
@@ -79,7 +78,6 @@ async fn quic_routed_udp_delivers_long_header_dcid_to_target_worker() {
     for _ in 0..100 {
         if let Some(name) = seen_worker.lock().unwrap().clone() {
             assert!(name.ends_with("worker-2"), "unexpected worker thread: {name}");
-            runtime.remove_listener(listener).unwrap();
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -92,8 +90,9 @@ async fn quic_routed_udp_delivers_long_header_dcid_to_target_worker() {
 async fn quic_routed_udp_drops_invalid_route_key() {
     let addr = free_addr();
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(2)).unwrap();
-    let listener = runtime.add_quic_listener(
-        ListenerConfig::new(addr),
+    QuicServer::serve(
+        &runtime,
+        ServiceConfig::new(addr),
         |_socket, _meta, _payload| async {
             panic!("invalid QUIC route key should not reach handler");
         },
@@ -103,15 +102,15 @@ async fn quic_routed_udp_drops_invalid_route_key() {
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     client.send_to(&[0xc0, 0, 0, 0, 1, 4, 1], addr).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    runtime.remove_listener(listener).unwrap();
 }
 
 #[tokio::test]
 async fn quic_routed_udp_requires_sixteen_bit_worker_shard() {
     let addr = free_addr();
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(2)).unwrap();
-    let listener = runtime.add_quic_listener(
-        ListenerConfig::new(addr),
+    QuicServer::serve(
+        &runtime,
+        ServiceConfig::new(addr),
         |_socket, _meta, _payload| async {
             panic!("one-byte DCID shard should not reach handler");
         },
@@ -121,5 +120,4 @@ async fn quic_routed_udp_requires_sixteen_bit_worker_shard() {
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     client.send_to(&[0xc0, 0, 0, 0, 1, 1, 1], addr).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    runtime.remove_listener(listener).unwrap();
 }

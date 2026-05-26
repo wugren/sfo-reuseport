@@ -70,6 +70,26 @@ fn serve_entrypoints_are_synchronous_and_do_not_pending() {
 }
 
 #[test]
+fn listener_dynamic_management_api_is_not_public() {
+    let tcp = include_str!("../../src/core/tcp.rs");
+    let udp = include_str!("../../src/core/udp.rs");
+    let runtime = include_str!("../../src/core/server_runtime.rs");
+    let lib = include_str!("../../src/lib.rs");
+    let core = include_str!("../../src/core/mod.rs");
+
+    assert!(!tcp.contains("pub fn add_tcp_listener"));
+    assert!(!udp.contains("pub fn add_udp_listener"));
+    assert!(!udp.contains("pub fn add_quic_listener"));
+    assert!(!runtime.contains("pub fn remove_listener"));
+    assert!(!runtime.contains("ListenerId"));
+    assert!(!runtime.contains("ListenerProtocol"));
+    assert!(!lib.contains("ListenerId"));
+    assert!(!lib.contains("ListenerProtocol"));
+    assert!(!core.contains("ListenerId"));
+    assert!(!core.contains("ListenerProtocol"));
+}
+
+#[test]
 fn balanced_udp_socket_is_not_public() {
     let lib = include_str!("../../src/lib.rs");
     let core = include_str!("../../src/core/mod.rs");
