@@ -18,6 +18,24 @@ pub(crate) type ShutdownReceiver = async_std::channel::Receiver<()>;
 pub(crate) type ExecutorTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 pub(crate) type ExecutorHandle = CurrentThreadExecutor;
 
+pub struct TaskHandle {
+    task: Option<async_executor::Task<()>>,
+}
+
+impl TaskHandle {
+    pub fn cancel(mut self) {
+        self.task.take();
+    }
+}
+
+impl Drop for TaskHandle {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.detach();
+        }
+    }
+}
+
 pub(crate) fn executor_task<F, Fut>(task: F) -> ExecutorTask
 where
     F: FnOnce() -> Fut + Send + 'static,
@@ -26,7 +44,7 @@ where
     Box::pin(task())
 }
 
-pub fn spawn<F>(future: F) -> io::Result<()>
+pub fn spawn<F>(future: F) -> io::Result<TaskHandle>
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -82,15 +100,16 @@ impl CurrentThreadExecutor {
         output
     }
 
-    pub fn spawn<F>(&self, future: F) -> io::Result<()>
+    pub fn spawn<F>(&self, future: F) -> io::Result<TaskHandle>
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.executor.spawn(future).detach();
-        Ok(())
+        Ok(TaskHandle {
+            task: Some(self.executor.spawn(future)),
+        })
     }
 
-    pub(crate) fn spawn_task(&self, task: ExecutorTask) -> io::Result<()> {
+    pub(crate) fn spawn_task(&self, task: ExecutorTask) -> io::Result<TaskHandle> {
         self.spawn(task)
     }
 
@@ -111,7 +130,7 @@ where
     TaskFut: Future<Output = ()> + Send + 'static,
     LocalFut: Future<Output = ()>,
 {
-    executor.spawn_task(executor_task(task))
+    executor.spawn_task(executor_task(task)).map(|_| ())
 }
 
 pub fn tcp_listener_from_std(listener: StdTcpListener) -> io::Result<TcpListener> {

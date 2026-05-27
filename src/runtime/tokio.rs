@@ -17,6 +17,16 @@ pub(crate) type ShutdownReceiver = tokio::sync::oneshot::Receiver<()>;
 pub(crate) type ExecutorTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 pub(crate) type ExecutorHandle = CurrentThreadExecutor;
 
+pub struct TaskHandle {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl TaskHandle {
+    pub fn cancel(self) {
+        self.handle.abort();
+    }
+}
+
 pub(crate) fn executor_task<F, Fut>(task: F) -> ExecutorTask
 where
     F: FnOnce() -> Fut + Send + 'static,
@@ -25,14 +35,14 @@ where
     Box::pin(task())
 }
 
-pub fn spawn<F>(future: F) -> io::Result<()>
+pub fn spawn<F>(future: F) -> io::Result<TaskHandle>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    tokio::runtime::Handle::try_current()
+    let handle = tokio::runtime::Handle::try_current()
         .map_err(|error| io::Error::new(io::ErrorKind::NotConnected, error))?
         .spawn(future);
-    Ok(())
+    Ok(TaskHandle { handle })
 }
 
 pub(crate) fn shutdown_channel() -> (ShutdownSender, ShutdownReceiver) {
@@ -92,22 +102,18 @@ impl CurrentThreadExecutor {
         }
     }
 
-    pub fn spawn<F>(&self, future: F) -> io::Result<()>
+    pub fn spawn<F>(&self, future: F) -> io::Result<TaskHandle>
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        match &self.inner {
-            CurrentThreadExecutorInner::Runtime(runtime) => {
-                runtime.spawn(future);
-            }
-            CurrentThreadExecutorInner::Handle(handle) => {
-                handle.spawn(future);
-            }
-        }
-        Ok(())
+        let handle = match &self.inner {
+            CurrentThreadExecutorInner::Runtime(runtime) => runtime.spawn(future),
+            CurrentThreadExecutorInner::Handle(handle) => handle.spawn(future),
+        };
+        Ok(TaskHandle { handle })
     }
 
-    pub(crate) fn spawn_task(&self, task: ExecutorTask) -> io::Result<()> {
+    pub(crate) fn spawn_task(&self, task: ExecutorTask) -> io::Result<TaskHandle> {
         self.spawn(task)
     }
 
@@ -128,7 +134,7 @@ where
     TaskFut: Future<Output = ()> + Send + 'static,
     LocalFut: Future<Output = ()>,
 {
-    executor.spawn_task(executor_task(task))
+    executor.spawn_task(executor_task(task)).map(|_| ())
 }
 
 pub fn tcp_listener_from_std(listener: StdTcpListener) -> io::Result<TcpListener> {

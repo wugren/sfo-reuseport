@@ -94,7 +94,7 @@ fn apply_common_options(socket: &socket2::Socket, config: &ServiceConfig) -> Res
         .map_err(Error::from)?;
     imp::set_reuse_port(socket)?;
 
-    imp::apply_ipv4_transparent(socket, config)?;
+    imp::apply_transparent(socket, config)?;
 
     Ok(())
 }

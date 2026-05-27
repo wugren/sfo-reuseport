@@ -1,8 +1,6 @@
-use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
+use std::sync::Mutex;
 
 use crate::core::{
     Error, HandlerFuture, HandlerFutureBox, PacketMeta, ServerRuntime, ServiceConfig,
@@ -13,25 +11,64 @@ use crate::runtime::{self, TcpStream};
 
 type TcpHandler = Arc<dyn Fn(TcpStream) -> HandlerFutureBox + Send + Sync>;
 
-pub struct TcpServer;
+#[derive(Clone)]
+pub struct TcpServer {
+    state: Arc<TcpServerState>,
+}
+
+struct TcpServerState {
+    tasks: Mutex<Vec<runtime::TaskHandle>>,
+}
 
 impl TcpServer {
     pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
         config: ServiceConfig,
         handler: F,
-    ) -> Result<(), Error>
+    ) -> Result<Self, Error>
     where
         F: Fn(TcpStream) -> Fut + Clone + Send + Sync + 'static,
         Fut: HandlerFuture,
     {
         config.validate()?;
+        let server = Self {
+            state: Arc::new(TcpServerState::new()),
+        };
         if !platform::supports_reuse_port_balancing() {
-            add_simulated_listener(runtime, config, handler)?;
+            add_simulated_listener(runtime, config, handler, Arc::clone(&server.state))?;
         } else {
-            add_reuse_port_listener(runtime, config, handler)?;
+            add_reuse_port_listener(runtime, config, handler, Arc::clone(&server.state))?;
         }
+        Ok(server)
+    }
+
+    pub fn close(&self) -> Result<(), Error> {
+        self.state.close();
         Ok(())
+    }
+}
+
+impl TcpServerState {
+    fn new() -> Self {
+        Self {
+            tasks: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn register_task(&self, task: runtime::TaskHandle) -> Result<(), Error> {
+        self.tasks
+            .lock()
+            .map_err(|_| Error::Runtime("tcp task registry lock poisoned".to_string()))?
+            .push(task);
+        Ok(())
+    }
+
+    fn close(&self) {
+        if let Ok(mut tasks) = self.tasks.lock() {
+            for task in tasks.drain(..) {
+                task.cancel();
+            }
+        }
     }
 }
 
@@ -39,6 +76,7 @@ fn add_reuse_port_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
+    state: Arc<TcpServerState>,
 ) -> Result<(), Error>
 where
     F: Fn(TcpStream) -> Fut + Clone + Send + Sync + 'static,
@@ -50,19 +88,20 @@ where
             "worker count must be greater than zero".to_string(),
         ));
     }
-    let active = runtime.active_flag();
+    let runtime_active = runtime.active_flag();
 
     let handler = tcp_handler(handler);
     for (worker_id, listener) in listeners.into_iter().enumerate() {
-        let active = Arc::clone(&active);
+        let runtime_active = Arc::clone(&runtime_active);
         let handler = Arc::clone(&handler);
-        runtime.submit_to_worker(worker_id, move || async move {
+        let task = runtime.submit_to_worker(worker_id, move || async move {
             let Ok(listener) = runtime::tcp_listener_from_std(listener).map_err(Error::from)
             else {
                 return;
             };
-            tcp_listener_loop(listener, active, handler).await;
+            tcp_listener_loop(listener, runtime_active, handler).await;
         })?;
+        state.register_task(task)?;
     }
 
     Ok(())
@@ -72,6 +111,7 @@ fn add_simulated_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
+    state: Arc<TcpServerState>,
 ) -> Result<(), Error>
 where
     F: Fn(TcpStream) -> Fut + Clone + Send + Sync + 'static,
@@ -85,24 +125,26 @@ where
 
     let listener = platform::bind_tcp(&service_config)?;
     let addr = listener.local_addr().map_err(Error::from)?;
-    let active = runtime.active_flag();
+    let runtime_active = runtime.active_flag();
 
     let worker_executors = runtime.worker_executors();
     let worker_count = worker_executors.len();
     let handler = tcp_handler(handler);
-    thread::Builder::new()
-        .name("sfo-reuseport-simulated-tcp-accept".to_string())
-        .spawn(move || {
-            simulated_tcp_accept_loop(
-                listener,
-                active,
-                worker_executors,
-                worker_count,
-                addr,
-                handler,
-            );
-        })
-        .map_err(Error::from)?;
+    let task = runtime.submit_to_worker(0, move || async move {
+        let Ok(listener) = runtime::tcp_listener_from_std(listener).map_err(Error::from) else {
+            return;
+        };
+        simulated_tcp_accept_loop(
+            listener,
+            runtime_active,
+            worker_executors,
+            worker_count,
+            addr,
+            handler,
+        )
+        .await;
+    })?;
+    state.register_task(task)?;
 
     Ok(())
 }
@@ -120,17 +162,14 @@ where
 
 async fn tcp_listener_loop(
     listener: runtime::TcpListener,
-    active: Arc<AtomicBool>,
+    runtime_active: Arc<AtomicBool>,
     handler: TcpHandler,
 ) {
-    while active.load(Ordering::SeqCst) {
+    while is_active(&runtime_active) {
         let Ok((stream, _)) = listener.accept().await else {
-            if active.load(Ordering::SeqCst) {
-                continue;
-            }
             break;
         };
-        if !active.load(Ordering::SeqCst) {
+        if !is_active(&runtime_active) {
             break;
         }
         if handler(stream).await.is_err() {
@@ -139,35 +178,19 @@ async fn tcp_listener_loop(
     }
 }
 
-fn simulated_tcp_accept_loop(
-    listener: std::net::TcpListener,
-    active: Arc<AtomicBool>,
+async fn simulated_tcp_accept_loop(
+    listener: runtime::TcpListener,
+    runtime_active: Arc<AtomicBool>,
     worker_executors: Vec<runtime::ExecutorHandle>,
     worker_count: usize,
     local_addr: std::net::SocketAddr,
     handler: TcpHandler,
 ) {
-    if listener.set_nonblocking(true).is_err() {
-        return;
-    }
-
-    while active.load(Ordering::SeqCst) {
-        let (stream, peer_addr) = match listener.accept() {
-            Ok(accepted) => accepted,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(5));
-                continue;
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => {
-                if active.load(Ordering::SeqCst) {
-                    thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                break;
-            }
+    while is_active(&runtime_active) {
+        let Ok((stream, peer_addr)) = listener.accept().await else {
+            break;
         };
-        if !active.load(Ordering::SeqCst) {
+        if !is_active(&runtime_active) {
             break;
         }
         let meta = PacketMeta {
@@ -181,17 +204,17 @@ fn simulated_tcp_accept_loop(
             break;
         };
         let handler = Arc::clone(&handler);
-        let submit_result =
-            ServerRuntime::submit_to_executor(executor, move || async move {
-                let Ok(stream) = runtime::tcp_stream_from_std(stream).map_err(Error::from) else {
-                    return;
-                };
-                let _ = handler(stream).await;
-            });
+        let submit_result = ServerRuntime::submit_to_executor(executor, move || async move {
+            let _ = handler(stream).await;
+        });
         if submit_result.is_err() {
             break;
         }
     }
+}
+
+fn is_active(runtime_active: &AtomicBool) -> bool {
+    runtime_active.load(Ordering::SeqCst)
 }
 
 fn select_simulated_tcp_worker(

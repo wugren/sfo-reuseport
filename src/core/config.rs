@@ -88,6 +88,7 @@ pub enum WorkerCount {
 pub struct SocketOptions {
     pub reuse_address: bool,
     pub ipv4_transparent: TransparentMode,
+    pub ipv6_transparent: TransparentMode,
 }
 
 impl Default for SocketOptions {
@@ -95,6 +96,7 @@ impl Default for SocketOptions {
         Self {
             reuse_address: true,
             ipv4_transparent: TransparentMode::Disabled,
+            ipv6_transparent: TransparentMode::Disabled,
         }
     }
 }

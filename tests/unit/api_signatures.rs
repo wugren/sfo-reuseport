@@ -27,21 +27,21 @@ fn callback_signatures_do_not_include_worker_id() {
 
 #[test]
 fn server_entrypoints_are_public() {
-    let _tcp = TcpServer;
-    let _udp = UdpServer;
-    let _quic = QuicServer;
     let config = ServiceConfig::new("127.0.0.1:0".parse().unwrap());
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
-    let tcp: Result<(), Error> = TcpServer::serve(&runtime, config.clone(), |_stream| async {
+    let tcp: Result<TcpServer, Error> = TcpServer::serve(&runtime, config.clone(), |_stream| async {
         Ok(())
     });
-    let udp: Result<(), Error> = UdpServer::serve(&runtime, config.clone(), |_socket, _meta, _payload| async {
-        Ok(())
-    });
-    let quic: Result<(), Error> = QuicServer::serve(&runtime, config, |_socket, _meta, _payload| async {
-        Ok(())
-    });
-    drop((tcp, udp, quic));
+    let udp: Result<UdpServer, Error> =
+        UdpServer::serve(&runtime, config.clone(), |_socket, _meta, _payload| async {
+            Ok(())
+        });
+    let quic: Result<QuicServer, Error> =
+        QuicServer::serve(&runtime, config, |_socket, _meta, _payload| async { Ok(()) });
+
+    tcp.unwrap().close().unwrap();
+    udp.unwrap().close().unwrap();
+    quic.unwrap().close().unwrap();
 }
 
 #[test]

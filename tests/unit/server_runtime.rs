@@ -29,27 +29,31 @@ fn server_runtime_does_not_depend_on_server_facades() {
 }
 
 #[test]
-fn servers_can_attach_to_server_runtime_through_serve() {
+fn servers_return_handles_when_attached_to_server_runtime_through_serve() {
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
 
-    TcpServer::serve(
+    let tcp = TcpServer::serve(
         &runtime,
         ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
         |_stream| async { Ok(()) },
     )
     .unwrap();
-    UdpServer::serve(
+    let udp = UdpServer::serve(
         &runtime,
         ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
         |_socket, _meta, _payload| async { Ok(()) },
     )
     .unwrap();
-    QuicServer::serve(
+    let quic = QuicServer::serve(
         &runtime,
         ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
         |_socket, _meta, _payload| async { Ok(()) },
     )
     .unwrap();
+
+    tcp.close().unwrap();
+    udp.close().unwrap();
+    quic.close().unwrap();
 }
 
 #[test]

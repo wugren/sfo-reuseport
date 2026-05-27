@@ -6,15 +6,22 @@ pub(crate) fn set_reuse_port(_socket: &socket2::Socket) -> Result<(), Error> {
     Ok(())
 }
 
-pub(crate) fn apply_ipv4_transparent(
+pub(crate) fn apply_transparent(
     _socket: &socket2::Socket,
     config: &ServiceConfig,
 ) -> Result<(), Error> {
-    match config.socket_options.ipv4_transparent {
-        TransparentMode::Disabled | TransparentMode::BestEffort => Ok(()),
-        TransparentMode::Required => Err(Error::UnsupportedPlatformOption(
-            "ipv4 transparent sockets are only supported on Linux targets".to_string(),
-        )),
+    if matches!(
+        (
+            config.socket_options.ipv4_transparent,
+            config.socket_options.ipv6_transparent,
+        ),
+        (TransparentMode::Required, _) | (_, TransparentMode::Required)
+    ) {
+        Err(Error::UnsupportedPlatformOption(
+            "transparent sockets are only supported on Linux targets".to_string(),
+        ))
+    } else {
+        Ok(())
     }
 }
 

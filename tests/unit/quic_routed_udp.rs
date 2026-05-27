@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use sfo_reuseport::{Error, PacketMeta, QuicServer, UdpSocket};
+use sfo_reuseport::{Error, PacketMeta, UdpSocket};
 
 fn assert_quic_udp_handler<F, Fut>(_handler: F)
 where
@@ -11,6 +11,5 @@ where
 
 #[test]
 fn quic_server_is_a_udp_packet_routing_entrypoint() {
-    let _server = QuicServer;
     assert_quic_udp_handler(|_socket, _meta, _payload| async { Ok(()) });
 }

@@ -1,6 +1,7 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("runtime-tokio-uring is only supported on Linux targets");
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
 use std::net::{
@@ -9,6 +10,7 @@ use std::net::{
 };
 use std::ops::Deref;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, ThreadId};
 
@@ -70,6 +72,29 @@ pub(crate) type ShutdownReceiver = tokio::sync::oneshot::Receiver<()>;
 pub(crate) type ExecutorTask =
     Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static>;
 
+pub struct TaskHandle {
+    inner: TaskHandleInner,
+}
+
+enum TaskHandleInner {
+    Local(tokio::task::JoinHandle<()>),
+    Remote {
+        id: u64,
+        task_sender: tokio::sync::mpsc::UnboundedSender<TaskCommand>,
+    },
+}
+
+impl TaskHandle {
+    pub fn cancel(self) {
+        match self.inner {
+            TaskHandleInner::Local(handle) => handle.abort(),
+            TaskHandleInner::Remote { id, task_sender } => {
+                let _ = task_sender.send(TaskCommand::Cancel { id });
+            }
+        }
+    }
+}
+
 pub(crate) fn executor_task<F, Fut>(task: F) -> ExecutorTask
 where
     F: FnOnce() -> Fut + Send + 'static,
@@ -78,12 +103,14 @@ where
     Box::new(move || Box::pin(task()))
 }
 
-pub fn spawn<F>(future: F) -> io::Result<()>
+pub fn spawn<F>(future: F) -> io::Result<TaskHandle>
 where
     F: Future<Output = ()> + 'static,
 {
-    tokio_uring::spawn(future);
-    Ok(())
+    let handle = tokio_uring::spawn(future);
+    Ok(TaskHandle {
+        inner: TaskHandleInner::Local(handle),
+    })
 }
 
 pub(crate) fn shutdown_channel() -> (ShutdownSender, ShutdownReceiver) {
@@ -97,23 +124,30 @@ impl ShutdownSender {
     }
 }
 
+enum TaskCommand {
+    Spawn { id: u64, task: ExecutorTask },
+    Cancel { id: u64 },
+}
+
 enum CurrentThreadExecutorInner {
     Runtime {
         runtime: tokio_uring::Runtime,
-        task_receiver: tokio::sync::mpsc::UnboundedReceiver<ExecutorTask>,
+        task_receiver: tokio::sync::mpsc::UnboundedReceiver<TaskCommand>,
     },
 }
 
 pub struct CurrentThreadExecutor {
     owner_thread: ThreadId,
-    task_sender: tokio::sync::mpsc::UnboundedSender<ExecutorTask>,
+    next_task_id: Arc<AtomicU64>,
+    task_sender: tokio::sync::mpsc::UnboundedSender<TaskCommand>,
     inner: CurrentThreadExecutorInner,
 }
 
 #[derive(Clone)]
 pub(crate) struct ExecutorHandle {
     owner_thread: ThreadId,
-    task_sender: tokio::sync::mpsc::UnboundedSender<ExecutorTask>,
+    next_task_id: Arc<AtomicU64>,
+    task_sender: tokio::sync::mpsc::UnboundedSender<TaskCommand>,
 }
 
 impl CurrentThreadExecutor {
@@ -122,6 +156,7 @@ impl CurrentThreadExecutor {
         let (task_sender, task_receiver) = tokio::sync::mpsc::unbounded_channel();
         Ok(Self {
             owner_thread: thread::current().id(),
+            next_task_id: Arc::new(AtomicU64::new(1)),
             task_sender,
             inner: CurrentThreadExecutorInner::Runtime {
                 runtime,
@@ -133,6 +168,7 @@ impl CurrentThreadExecutor {
     pub(crate) fn handle(&self) -> ExecutorHandle {
         ExecutorHandle {
             owner_thread: self.owner_thread,
+            next_task_id: Arc::clone(&self.next_task_id),
             task_sender: self.task_sender.clone(),
         }
     }
@@ -146,22 +182,30 @@ impl CurrentThreadExecutor {
         }
     }
 
-    pub fn spawn<F>(&self, future: F) -> io::Result<()>
+    pub fn spawn<F>(&self, future: F) -> io::Result<TaskHandle>
     where
         F: Future<Output = ()> + Send + 'static,
     {
         self.spawn_task(Box::new(move || Box::pin(future)))
     }
 
-    pub(crate) fn spawn_task(&self, task: ExecutorTask) -> io::Result<()> {
+    pub(crate) fn spawn_task(&self, task: ExecutorTask) -> io::Result<TaskHandle> {
         if thread::current().id() == self.owner_thread {
-            tokio_uring::spawn(task());
-            return Ok(());
+            let handle = tokio_uring::spawn(task());
+            return Ok(TaskHandle {
+                inner: TaskHandleInner::Local(handle),
+            });
         }
+        let id = self.next_task_id.fetch_add(1, Ordering::Relaxed);
         self.task_sender
-            .send(task)
+            .send(TaskCommand::Spawn { id, task })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "worker runtime stopped"))?;
-        Ok(())
+        Ok(TaskHandle {
+            inner: TaskHandleInner::Remote {
+                id,
+                task_sender: self.task_sender.clone(),
+            },
+        })
     }
 
     pub(crate) fn park_until_shutdown(self, shutdown: ShutdownReceiver) {
@@ -171,30 +215,55 @@ impl CurrentThreadExecutor {
         } = self.inner;
         runtime.block_on(async move {
             let mut shutdown = shutdown;
+            let mut task_handles = HashMap::new();
             loop {
                 tokio::select! {
                     _ = &mut shutdown => break,
-                    task = task_receiver.recv() => {
-                        let Some(task) = task else {
+                    command = task_receiver.recv() => {
+                        let Some(command) = command else {
                             break;
                         };
-                        tokio_uring::spawn(task());
+                        task_handles.retain(|_, handle: &mut tokio::task::JoinHandle<()>| {
+                            !handle.is_finished()
+                        });
+                        match command {
+                            TaskCommand::Spawn { id, task } => {
+                                task_handles.insert(id, tokio_uring::spawn(task()));
+                            }
+                            TaskCommand::Cancel { id } => {
+                                if let Some(handle) = task_handles.remove(&id) {
+                                    handle.abort();
+                                }
+                            }
+                        }
                     }
                 }
+            }
+            for (_, handle) in task_handles {
+                handle.abort();
             }
         });
     }
 }
 
 impl ExecutorHandle {
-    pub(crate) fn spawn_task(&self, task: ExecutorTask) -> io::Result<()> {
+    pub(crate) fn spawn_task(&self, task: ExecutorTask) -> io::Result<TaskHandle> {
         if thread::current().id() == self.owner_thread {
-            tokio_uring::spawn(task());
-            return Ok(());
+            let handle = tokio_uring::spawn(task());
+            return Ok(TaskHandle {
+                inner: TaskHandleInner::Local(handle),
+            });
         }
+        let id = self.next_task_id.fetch_add(1, Ordering::Relaxed);
         self.task_sender
-            .send(task)
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "worker runtime stopped"))
+            .send(TaskCommand::Spawn { id, task })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "worker runtime stopped"))?;
+        Ok(TaskHandle {
+            inner: TaskHandleInner::Remote {
+                id,
+                task_sender: self.task_sender.clone(),
+            },
+        })
     }
 }
 

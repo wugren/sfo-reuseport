@@ -45,7 +45,11 @@ impl ServerRuntime {
     }
 
     #[cfg(feature = "runtime-tokio-uring")]
-    pub(crate) fn submit_to_worker<T, Fut>(&self, worker_id: usize, task: T) -> Result<(), Error>
+    pub(crate) fn submit_to_worker<T, Fut>(
+        &self,
+        worker_id: usize,
+        task: T,
+    ) -> Result<runtime::TaskHandle, Error>
     where
         T: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + 'static,
@@ -55,7 +59,11 @@ impl ServerRuntime {
     }
 
     #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
-    pub(crate) fn submit_to_worker<T, Fut>(&self, worker_id: usize, task: T) -> Result<(), Error>
+    pub(crate) fn submit_to_worker<T, Fut>(
+        &self,
+        worker_id: usize,
+        task: T,
+    ) -> Result<runtime::TaskHandle, Error>
     where
         T: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
@@ -68,7 +76,7 @@ impl ServerRuntime {
     pub(crate) fn submit_to_executor<T, Fut>(
         executor: &runtime::ExecutorHandle,
         task: T,
-    ) -> Result<(), Error>
+    ) -> Result<runtime::TaskHandle, Error>
     where
         T: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + 'static,
@@ -82,7 +90,7 @@ impl ServerRuntime {
     pub(crate) fn submit_to_executor<T, Fut>(
         executor: &runtime::ExecutorHandle,
         task: T,
-    ) -> Result<(), Error>
+    ) -> Result<runtime::TaskHandle, Error>
     where
         T: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
@@ -125,7 +133,7 @@ struct WorkerHandle {
 }
 
 impl WorkerHandle {
-    fn submit(&self, task: runtime::ExecutorTask) -> io::Result<()> {
+    fn submit(&self, task: runtime::ExecutorTask) -> io::Result<runtime::TaskHandle> {
         self.executor.spawn_task(task)
     }
 }

@@ -18,7 +18,13 @@ async fn tcp_bind_invokes_socket_init_callback_and_propagates_error() {
     let result = TcpServer::serve(&runtime, config, |_stream| async { Ok(()) });
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let message = result.unwrap_err().to_string();
+    let message = match result {
+        Ok(server) => {
+            server.close().unwrap();
+            panic!("tcp callback failure should prevent server startup");
+        }
+        Err(error) => error.to_string(),
+    };
     assert!(message.contains("socket init callback"));
     assert!(message.contains("tcp callback failure"));
 }
@@ -38,7 +44,13 @@ async fn udp_bind_invokes_socket_init_callback_and_propagates_error() {
     let result = UdpServer::serve(&runtime, config, |_socket, _meta, _payload| async { Ok(()) });
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let message = result.unwrap_err().to_string();
+    let message = match result {
+        Ok(server) => {
+            server.close().unwrap();
+            panic!("udp callback failure should prevent server startup");
+        }
+        Err(error) => error.to_string(),
+    };
     assert!(message.contains("socket init callback"));
     assert!(message.contains("udp callback failure"));
 }

@@ -8,26 +8,46 @@ pub(crate) fn set_reuse_port(socket: &socket2::Socket) -> Result<(), Error> {
     super::unix::set_reuse_port(socket)
 }
 
-pub(crate) fn apply_ipv4_transparent(
+pub(crate) fn apply_transparent(
     socket: &socket2::Socket,
     config: &ServiceConfig,
 ) -> Result<(), Error> {
-    if !config.bind_addr.is_ipv4() {
-        return match config.socket_options.ipv4_transparent {
-            TransparentMode::Disabled | TransparentMode::BestEffort => Ok(()),
-            TransparentMode::Required => Err(Error::UnsupportedPlatformOption(
-                "ipv4 transparent requires an IPv4 bind address".to_string(),
-            )),
-        };
-    }
+    apply_ipv4_transparent(socket, config)?;
+    apply_ipv6_transparent(socket, config)?;
+    Ok(())
+}
 
+fn apply_ipv4_transparent(socket: &socket2::Socket, config: &ServiceConfig) -> Result<(), Error> {
     match config.socket_options.ipv4_transparent {
         TransparentMode::Disabled => Ok(()),
+        TransparentMode::BestEffort if !config.bind_addr.is_ipv4() => Ok(()),
+        TransparentMode::Required if !config.bind_addr.is_ipv4() => Err(
+            Error::UnsupportedPlatformOption(
+                "ipv4 transparent requires an IPv4 bind address".to_string(),
+            ),
+        ),
         TransparentMode::BestEffort => {
-            let _ = socket.set_ip_transparent(true);
+            let _ = socket.set_ip_transparent_v4(true);
             Ok(())
         }
-        TransparentMode::Required => socket.set_ip_transparent(true).map_err(Error::from),
+        TransparentMode::Required => socket.set_ip_transparent_v4(true).map_err(Error::from),
+    }
+}
+
+fn apply_ipv6_transparent(socket: &socket2::Socket, config: &ServiceConfig) -> Result<(), Error> {
+    match config.socket_options.ipv6_transparent {
+        TransparentMode::Disabled => Ok(()),
+        TransparentMode::BestEffort if !config.bind_addr.is_ipv6() => Ok(()),
+        TransparentMode::Required if !config.bind_addr.is_ipv6() => Err(
+            Error::UnsupportedPlatformOption(
+                "ipv6 transparent requires an IPv6 bind address".to_string(),
+            ),
+        ),
+        TransparentMode::BestEffort => {
+            let _ = socket.set_ip_transparent_v6(true);
+            Ok(())
+        }
+        TransparentMode::Required => socket.set_ip_transparent_v6(true).map_err(Error::from),
     }
 }
 

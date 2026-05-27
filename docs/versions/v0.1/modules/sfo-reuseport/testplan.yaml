@@ -43,8 +43,8 @@ levels:
         change_ids: ["CHG-server-runtime", "CHG-worker-model"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: explicit-runtime-serve-api
-        name: TcpServer UdpServer QuicServer 只接受显式 ServerRuntime 的同步 serve 入口
-        change_ids: ["CHG-server-runtime", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp"]
+        name: TcpServer UdpServer QuicServer 只接受显式 ServerRuntime 的同步 serve 入口并返回 server 对象
+        change_ids: ["CHG-server-runtime", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp", "CHG-dynamic-listeners"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: worker-thread-runtime
         name: 每 worker 独立线程和单线程 async runtime 启动路径
@@ -55,8 +55,8 @@ levels:
         change_ids: ["CHG-worker-model", "CHG-tcp-serve", "CHG-udp-runtime-socket"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: udp-runtime-socket-api
-        name: UDP handler runtime 原生 UdpSocket API 契约
-        change_ids: ["CHG-udp-runtime-socket"]
+        name: UDP handler 和 server listener runtime 原生 UdpSocket API 契约
+        change_ids: ["CHG-udp-runtime-socket", "CHG-dynamic-listeners", "CHG-quic-routed-udp"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: linux-compatible-scheduling
         name: Linux 兼容内部调度和 Dispatcher API 缺失契约
@@ -144,7 +144,7 @@ levels:
       notes:
         - 实现阶段需要创建 loopback integration tests。
         - platform-os-matrix 需要 CI matrix 或人工在目标 OS 执行。
-        - transparent-privileged-manual 需要具备 IPv4 transparent 所需权限和系统配置。
+        - transparent-privileged-manual 需要具备 IPv4/IPv6 transparent 所需权限和系统配置。
     steps:
       - id: tcp-loopback-serve
         name: TCP loopback 多连接 accept 和回调交付
@@ -159,8 +159,12 @@ levels:
         change_ids: ["CHG-udp-runtime-socket", "CHG-worker-model", "CHG-worker-thread-runtime", "CHG-runtime-features"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: dynamic-listeners
-        name: TCP/UDP/QUIC serve 注册和 listener 动态管理 API 不公开
-        change_ids: ["CHG-dynamic-listeners", "CHG-tcp-serve", "CHG-udp-runtime-socket"]
+        name: TCP/UDP/QUIC serve 注册、server 对象关闭和 listener 动态管理 API 不公开
+        change_ids: ["CHG-dynamic-listeners", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: udp-quic-listener-socket
+        name: UDP/QUIC server 返回正在监听的 runtime UdpSocket
+        change_ids: ["CHG-dynamic-listeners", "CHG-udp-runtime-socket", "CHG-quic-routed-udp"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: mixed-protocol-workers
         name: 同一 ServerRuntime 实例同时处理 TCP 与 UDP listener
@@ -181,8 +185,8 @@ levels:
         manual_reason: 单机无法覆盖 Linux、macOS、FreeBSD 和 Windows 全矩阵；需要 CI matrix 或人工在目标 OS 运行。
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: transparent-privileged-manual
-        name: Linux IPv4 transparent 特权路径验证
+        name: Linux IPv4/IPv6 transparent 特权路径验证
         change_ids: ["CHG-socket-options", "CHG-platform-behavior"]
         mode: manual
-        manual_reason: IPv4 transparent 通常需要 OS 支持、权限或系统配置；特权路径使用 manual 验证。
+        manual_reason: IPv4/IPv6 transparent 通常需要 OS 支持、权限或系统配置；特权路径使用 manual 验证。
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]

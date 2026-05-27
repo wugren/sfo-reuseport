@@ -1,6 +1,8 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::net::{Shutdown, SocketAddr, UdpSocket as StdUdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use crate::core::{
     Error, HandlerFuture, HandlerFutureBox, ServerRuntime, ServiceConfig, linux_reuseport_select,
@@ -16,25 +18,133 @@ pub struct PacketMeta {
     pub local_addr: Option<SocketAddr>,
 }
 
-pub struct UdpServer;
+#[derive(Clone)]
+pub struct UdpServer {
+    state: Arc<UdpServerState>,
+}
+
+struct UdpServerState {
+    active: Arc<AtomicBool>,
+    tasks: Mutex<Vec<runtime::TaskHandle>>,
+    sockets: Mutex<Vec<StdUdpSocket>>,
+    thread_sockets: Mutex<HashMap<thread::ThreadId, StdUdpSocket>>,
+    next_socket: AtomicUsize,
+}
 
 impl UdpServer {
     pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
         config: ServiceConfig,
         handler: F,
-    ) -> Result<(), Error>
+    ) -> Result<Self, Error>
     where
         F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
         Fut: HandlerFuture,
     {
         config.validate()?;
+        let server = Self {
+            state: Arc::new(UdpServerState::new()),
+        };
         if !platform::supports_reuse_port_balancing() {
-            add_simulated_listener(runtime, config, handler)?;
+            add_simulated_listener(runtime, config, handler, Arc::clone(&server.state))?;
         } else {
-            add_reuse_port_listener(runtime, config, handler)?;
+            add_reuse_port_listener(runtime, config, handler, Arc::clone(&server.state))?;
         }
+        Ok(server)
+    }
+
+    pub fn close(&self) -> Result<(), Error> {
+        self.state.close();
         Ok(())
+    }
+
+    pub fn listener_socket(&self) -> Result<UdpSocket, Error> {
+        self.state.listener_socket()
+    }
+}
+
+impl UdpServerState {
+    fn new() -> Self {
+        Self {
+            active: Arc::new(AtomicBool::new(true)),
+            tasks: Mutex::new(Vec::new()),
+            sockets: Mutex::new(Vec::new()),
+            thread_sockets: Mutex::new(HashMap::new()),
+            next_socket: AtomicUsize::new(0),
+        }
+    }
+
+    fn close(&self) {
+        self.active.store(false, Ordering::SeqCst);
+        if let Ok(mut sockets) = self.sockets.lock() {
+            for socket in sockets.drain(..) {
+                let _ = socket2::SockRef::from(&socket).shutdown(Shutdown::Both);
+            }
+        }
+        if let Ok(mut thread_sockets) = self.thread_sockets.lock() {
+            thread_sockets.clear();
+        }
+        if let Ok(mut tasks) = self.tasks.lock() {
+            for task in tasks.drain(..) {
+                task.cancel();
+            }
+        }
+    }
+
+    fn register_task(&self, task: runtime::TaskHandle) -> Result<(), Error> {
+        self.tasks
+            .lock()
+            .map_err(|_| Error::Runtime("udp task registry lock poisoned".to_string()))?
+            .push(task);
+        Ok(())
+    }
+
+    fn active_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.active)
+    }
+
+    fn register_listener_socket(&self, socket: &StdUdpSocket) -> Result<(), Error> {
+        let thread_socket = socket.try_clone().map_err(Error::from)?;
+        let pool_socket = socket.try_clone().map_err(Error::from)?;
+        self.thread_sockets
+            .lock()
+            .map_err(|_| Error::Runtime("server socket registry lock poisoned".to_string()))?
+            .insert(thread::current().id(), thread_socket);
+        self.sockets
+            .lock()
+            .map_err(|_| Error::Runtime("server socket registry lock poisoned".to_string()))?
+            .push(pool_socket);
+        Ok(())
+    }
+
+    fn listener_socket(&self) -> Result<UdpSocket, Error> {
+        if !self.active.load(Ordering::SeqCst) {
+            return Err(Error::Runtime("server is closed".to_string()));
+        }
+        if let Some(socket) = self
+            .thread_sockets
+            .lock()
+            .map_err(|_| Error::Runtime("server socket registry lock poisoned".to_string()))?
+            .get(&thread::current().id())
+            .map(|socket| socket.try_clone())
+            .transpose()
+            .map_err(Error::from)?
+        {
+            return runtime::udp_socket_from_std(socket).map_err(Error::from);
+        }
+
+        let sockets = self
+            .sockets
+            .lock()
+            .map_err(|_| Error::Runtime("server socket registry lock poisoned".to_string()))?;
+        if sockets.is_empty() {
+            return Err(Error::Runtime("server has no listener socket".to_string()));
+        }
+        let seed = self.next_socket.fetch_add(1, Ordering::SeqCst)
+            ^ current_time_seed();
+        let index = seed % sockets.len();
+        let socket = sockets[index].try_clone().map_err(Error::from)?;
+        runtime::udp_socket_from_std(socket).map_err(Error::from)
     }
 }
 
@@ -42,6 +152,7 @@ fn add_reuse_port_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
+    state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
@@ -53,18 +164,24 @@ where
             "worker count must be greater than zero".to_string(),
         ));
     }
-    let active = runtime.active_flag();
+    let runtime_active = runtime.active_flag();
 
     let handler = udp_handler(handler);
     for (worker_id, socket) in sockets.into_iter().enumerate() {
-        let active = Arc::clone(&active);
+        let runtime_active = Arc::clone(&runtime_active);
+        let server_active = state.active_flag();
+        let task_state = Arc::clone(&state);
         let handler = Arc::clone(&handler);
-        runtime.submit_to_worker(worker_id, move || async move {
+        let task = runtime.submit_to_worker(worker_id, move || async move {
+            if task_state.register_listener_socket(&socket).is_err() {
+                return;
+            }
             let Ok(socket) = runtime::udp_socket_from_std(socket).map_err(Error::from) else {
                 return;
             };
-            udp_listener_loop(socket, active, handler).await;
+            udp_listener_loop(socket, runtime_active, server_active, handler).await;
         })?;
+        state.register_task(task)?;
     }
 
     Ok(())
@@ -74,6 +191,7 @@ fn add_simulated_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
+    state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
@@ -86,43 +204,65 @@ where
     }
 
     let socket = platform::bind_udp(&service_config)?;
-    let active = runtime.active_flag();
+    let runtime_active = runtime.active_flag();
+    let server_active = state.active_flag();
 
     let worker_executors = runtime.worker_executors();
     let worker_count = worker_executors.len();
     let handler = udp_handler(handler);
-    runtime.submit_to_worker(0, move || async move {
+    let task_state = Arc::clone(&state);
+    let task = runtime.submit_to_worker(0, move || async move {
+        if task_state.register_listener_socket(&socket).is_err() {
+            return;
+        }
         let Ok(socket) = runtime::udp_socket_from_std(socket).map_err(Error::from) else {
             return;
         };
         simulated_udp_listener_loop(
             socket,
-            active,
+            runtime_active,
+            server_active,
             worker_executors,
             worker_count,
             handler,
         )
         .await;
     })?;
+    state.register_task(task)?;
 
     Ok(())
 }
 
-pub struct QuicServer;
+#[derive(Clone)]
+pub struct QuicServer {
+    state: Arc<UdpServerState>,
+}
 
 impl QuicServer {
     pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
         config: ServiceConfig,
         handler: F,
-    ) -> Result<(), Error>
+    ) -> Result<Self, Error>
     where
         F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
         Fut: HandlerFuture,
     {
         config.validate()?;
-        add_quic_routed_listener(runtime, config, handler)?;
+        let server = Self {
+            state: Arc::new(UdpServerState::new()),
+        };
+        add_quic_routed_listener(runtime, config, handler, Arc::clone(&server.state))?;
+        Ok(server)
+    }
+
+    pub fn close(&self) -> Result<(), Error> {
+        self.state.close();
         Ok(())
+    }
+
+    pub fn listener_socket(&self) -> Result<UdpSocket, Error> {
+        self.state.listener_socket()
     }
 }
 
@@ -130,38 +270,46 @@ fn add_quic_routed_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
+    state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
 {
     if platform::supports_reuse_port_balancing() {
-        return add_quic_reuseport_listener(runtime, service_config, handler);
+        return add_quic_reuseport_listener(runtime, service_config, handler, state);
     }
 
-    add_quic_simulated_listener(runtime, service_config, handler)
+    add_quic_simulated_listener(runtime, service_config, handler, state)
 }
 
 fn add_quic_reuseport_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
+    state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
 {
-    if add_quic_reuseport_bpf_listener(runtime, &service_config, handler.clone())? {
+    if add_quic_reuseport_bpf_listener(
+        runtime,
+        &service_config,
+        handler.clone(),
+        Arc::clone(&state),
+    )? {
         return Ok(());
     }
 
-    add_quic_simulated_listener(runtime, service_config, handler)
+    add_quic_simulated_listener(runtime, service_config, handler, state)
 }
 
 fn add_quic_simulated_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: ServiceConfig,
     handler: F,
+    state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
@@ -174,17 +322,31 @@ where
     }
 
     let socket = platform::bind_udp(&service_config)?;
-    let active = runtime.active_flag();
+    let runtime_active = runtime.active_flag();
+    let server_active = state.active_flag();
 
     let worker_executors = runtime.worker_executors();
     let worker_count = worker_executors.len();
     let handler = udp_handler(handler);
-    runtime.submit_to_worker(0, move || async move {
+    let task_state = Arc::clone(&state);
+    let task = runtime.submit_to_worker(0, move || async move {
+        if task_state.register_listener_socket(&socket).is_err() {
+            return;
+        }
         let Ok(socket) = runtime::udp_socket_from_std(socket).map_err(Error::from) else {
             return;
         };
-        quic_routed_udp_listener_loop(socket, active, worker_executors, worker_count, handler).await;
+        quic_routed_udp_listener_loop(
+            socket,
+            runtime_active,
+            server_active,
+            worker_executors,
+            worker_count,
+            handler,
+        )
+        .await;
     })?;
+    state.register_task(task)?;
 
     Ok(())
 }
@@ -193,6 +355,7 @@ fn add_quic_reuseport_bpf_listener<F, Fut>(
     runtime: &ServerRuntime,
     service_config: &ServiceConfig,
     handler: F,
+    state: Arc<UdpServerState>,
 ) -> Result<bool, Error>
 where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
@@ -208,19 +371,32 @@ where
             "worker count must be greater than zero".to_string(),
         ));
     }
-    let active = runtime.active_flag();
+    let runtime_active = runtime.active_flag();
 
     let handler = udp_handler(handler);
     for (worker_id, socket) in sockets.into_iter().enumerate() {
-        let active = Arc::clone(&active);
+        let runtime_active = Arc::clone(&runtime_active);
+        let server_active = state.active_flag();
+        let task_state = Arc::clone(&state);
         let handler = Arc::clone(&handler);
         let worker_count = runtime.worker_count();
-        runtime.submit_to_worker(worker_id, move || async move {
+        let task = runtime.submit_to_worker(worker_id, move || async move {
+            if task_state.register_listener_socket(&socket).is_err() {
+                return;
+            }
             let Ok(socket) = runtime::udp_socket_from_std(socket).map_err(Error::from) else {
                 return;
             };
-            quic_reuseport_bpf_listener_loop(socket, active, worker_count, handler).await;
+            quic_reuseport_bpf_listener_loop(
+                socket,
+                runtime_active,
+                server_active,
+                worker_count,
+                handler,
+            )
+            .await;
         })?;
+        state.register_task(task)?;
     }
 
     Ok(true)
@@ -239,20 +415,21 @@ where
 
 async fn quic_routed_udp_listener_loop(
     socket: UdpSocket,
-    active: Arc<AtomicBool>,
+    runtime_active: Arc<AtomicBool>,
+    server_active: Arc<AtomicBool>,
     worker_executors: Vec<runtime::ExecutorHandle>,
     worker_count: usize,
     handler: UdpHandler,
 ) {
     let mut buffer = vec![0_u8; 65_536];
-    while active.load(Ordering::SeqCst) {
+    while is_active(&runtime_active, &server_active) {
         let Ok((len, peer_addr)) = runtime::udp_recv_from(&socket, &mut buffer).await else {
-            if active.load(Ordering::SeqCst) {
+            if is_active(&runtime_active, &server_active) {
                 continue;
             }
             break;
         };
-        if !active.load(Ordering::SeqCst) {
+        if !is_active(&runtime_active, &server_active) {
             break;
         }
         let payload = &buffer[..len];
@@ -278,19 +455,20 @@ async fn quic_routed_udp_listener_loop(
 
 async fn quic_reuseport_bpf_listener_loop(
     socket: UdpSocket,
-    active: Arc<AtomicBool>,
+    runtime_active: Arc<AtomicBool>,
+    server_active: Arc<AtomicBool>,
     worker_count: usize,
     handler: UdpHandler,
 ) {
     let mut buffer = vec![0_u8; 65_536];
-    while active.load(Ordering::SeqCst) {
+    while is_active(&runtime_active, &server_active) {
         let Ok((len, peer_addr)) = runtime::udp_recv_from(&socket, &mut buffer).await else {
-            if active.load(Ordering::SeqCst) {
+            if is_active(&runtime_active, &server_active) {
                 continue;
             }
             break;
         };
-        if !active.load(Ordering::SeqCst) {
+        if !is_active(&runtime_active, &server_active) {
             break;
         }
         let payload = &buffer[..len];
@@ -345,18 +523,19 @@ fn quic_worker_shard(bytes: &[u8]) -> Option<u16> {
 
 async fn udp_listener_loop(
     socket: UdpSocket,
-    active: Arc<AtomicBool>,
+    runtime_active: Arc<AtomicBool>,
+    server_active: Arc<AtomicBool>,
     handler: UdpHandler,
 ) {
     let mut buffer = vec![0_u8; 65_536];
-    while active.load(Ordering::SeqCst) {
+    while is_active(&runtime_active, &server_active) {
         let Ok((len, peer_addr)) = runtime::udp_recv_from(&socket, &mut buffer).await else {
-            if active.load(Ordering::SeqCst) {
+            if is_active(&runtime_active, &server_active) {
                 continue;
             }
             break;
         };
-        if !active.load(Ordering::SeqCst) {
+        if !is_active(&runtime_active, &server_active) {
             break;
         }
         let meta = PacketMeta {
@@ -374,20 +553,21 @@ async fn udp_listener_loop(
 
 async fn simulated_udp_listener_loop(
     socket: UdpSocket,
-    active: Arc<AtomicBool>,
+    runtime_active: Arc<AtomicBool>,
+    server_active: Arc<AtomicBool>,
     worker_executors: Vec<runtime::ExecutorHandle>,
     worker_count: usize,
     handler: UdpHandler,
 ) {
     let mut buffer = vec![0_u8; 65_536];
-    while active.load(Ordering::SeqCst) {
+    while is_active(&runtime_active, &server_active) {
         let Ok((len, peer_addr)) = runtime::udp_recv_from(&socket, &mut buffer).await else {
-            if active.load(Ordering::SeqCst) {
+            if is_active(&runtime_active, &server_active) {
                 continue;
             }
             break;
         };
-        if !active.load(Ordering::SeqCst) {
+        if !is_active(&runtime_active, &server_active) {
             break;
         }
         let meta = PacketMeta {
@@ -408,6 +588,17 @@ async fn simulated_udp_listener_loop(
             break;
         }
     }
+}
+
+fn is_active(runtime_active: &AtomicBool, server_active: &AtomicBool) -> bool {
+    runtime_active.load(Ordering::SeqCst) && server_active.load(Ordering::SeqCst)
+}
+
+fn current_time_seed() -> usize {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos() as usize)
+        .unwrap_or(0)
 }
 
 async fn submit_udp_handler(
