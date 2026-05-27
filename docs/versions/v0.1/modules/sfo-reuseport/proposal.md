@@ -3,8 +3,8 @@ module: sfo-reuseport
 submodule:
 version: v0.1
 status: approved
-approved_by: auto-pipeline
-approved_at: 2026-05-26T16:04:07Z
+approved_by: user
+approved_at: 2026-05-26T17:30:13Z
 ---
 
 # sfo-reuseport 提案
@@ -36,6 +36,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - 同一套 worker 线程集合必须能够同时承载 TCP listener 和 UDP listener；协议类型属于监听项属性，而不是独立服务线程池边界。
 - 提供专门的 `QuicServer` UDP 包分配入口，用于按 QUIC Destination Connection ID 或等价 QUIC 路由键把 UDP 数据包稳定分配到 worker；该入口只处理 UDP 包路由，不实现 QUIC 协议栈。
 - 提供一个基于 hyper 的 HTTP 静态文件服务器示例，用于展示如何在 `examples/` 中把本 crate 的 TCP 服务能力接入上层 HTTP 协议处理；静态文件根目录必须可通过命令行参数设置。
+- 在 `Cargo.toml` 中声明发布到 crates.io 所需的 package 元数据，包括 description、license、readme、repository 或 homepage/documentation、keywords、categories，以及必要时的 include/exclude 边界。
 
 ### 范围外
 - 不解析 HTTP 或自定义应用协议；除 `QuicServer` 为 UDP 包分配所需的 QUIC header 路由字段外，不解析 QUIC 协议语义。
@@ -70,8 +71,10 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - `QuicServer` 的公开命名表示 QUIC-aware UDP routing，不表示本 crate 提供完整 QUIC server 协议栈。
   - `runtime-tokio-uring` 可作为 Linux 定向 runtime feature 提供；非 Linux 平台上的编译期或运行时行为由后续设计定义，但必须给出明确错误或 cfg 边界。
   - HTTP 静态文件服务器示例只覆盖常见本地演示场景：监听地址和静态根目录可通过参数指定，普通文件请求返回文件内容，目录请求可尝试 `index.html`，越过静态根目录的路径必须拒绝。
+  - crates.io 发布元数据应来自仓库内稳定事实：README 作为 readme，MIT 许可来自根目录 `LICENSE`，描述、keywords 和 categories 只表达本 crate 的 multi-worker socket/reuse-port/runtime 能力，不暗示完整 HTTP、TLS 或 QUIC 协议栈。
 - 未决歧义：
   - crate 是否应保持 library-only，还是保留 `src/main.rs` 中的演示 binary。
+  - `repository`、`homepage` 和 `documentation` URL 需要在设计或实现前确认；不能用占位 URL 发布。
   - `TcpServer`、`UdpServer` 和 `QuicServer` 的 handler trait bounds、返回 future 生命周期和停止语义需要在设计阶段与唯一 `serve` 签名同步。
   - 最低 Rust 版本和支持的 OS 版本矩阵。
   - IPv4 transparent 等平台能力在非 Linux 平台上应表现为编译期不可用、运行时 `Unsupported`，还是由更通用的 capability 机制表达。
@@ -98,6 +101,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - 不要求用户协议代码按 Linux、macOS、FreeBSD 或 Windows 分支。
   - 除 crate feature 选择外，不要求用户协议代码按 tokio、async-std 或 tokio-uring 分支。
   - 不在均衡层实现协议特定状态机；`QuicServer` 仅允许实现足够的 QUIC header 路由字段读取和 worker 选择。
+  - 不在 package 元数据中声明超出 crate 实际能力的协议栈、生产级静态文件服务、TLS 或完整 QUIC server 能力。
 - 系统约束：
   - Linux 在可用且合适时使用原生 `SO_REUSEPORT`。
   - macOS 和 FreeBSD 使用原生 `SO_REUSEPORT`；当目标系统不能提供可用的 `SO_REUSEPORT` worker 分配能力时，回退到 Linux 兼容的内部用户态调度。
@@ -119,6 +123,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - 用户可以显式创建一个 `ServerRuntime`，在其中注册 TCP/UDP server 或 listener；worker 数量在 `ServerRuntime` 初始化时确定，并被该 runtime 下的所有 server 共享。
 - 用户通过同步的 `TcpServer::serve(&runtime, config, handler)`、`UdpServer::serve(&runtime, config, handler)` 或 `QuicServer::serve(&runtime, config, handler)` 使用单协议入口时，仍然复用同一个显式 `ServerRuntime`，公开 API 表面不出现第二套 runtime 创建方式，且调用完成 listener 注册后立即返回启动结果。
 - 用户可以运行 `examples/` 下的 hyper 静态文件服务器示例，并通过命令行参数选择静态文件根目录和监听地址。
+- crate manifest 包含足够的发布元数据，使 crates.io 使用者能从 package 页面理解用途、许可、README、源码位置和检索分类。
 
 ## Proposal Items
 | proposal_id | change_id | Outcome | Scope Boundary | Success Evidence | Explicit Non-goals |
@@ -138,6 +143,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | P-mixed-protocol-workers | CHG-mixed-protocol-workers | 同一套 worker 线程集合同时支持 TCP 和 UDP 监听项。 | worker 池、协议监听项注册、跨协议事件调度和错误隔离。 | 测试或可运行验证展示一个服务实例内 TCP 与 UDP listener 同时工作，并共享同一 worker 配置。 | 不提供按协议独立线程池作为 v0.1 默认模型，不实现跨协议自适应调度。 |
 | P-quic-routed-udp | CHG-quic-routed-udp | 提供专门的 `QuicServer` UDP 包分配入口，按 QUIC DCID 前 2 字节 big-endian `u16` worker shard 将同一逻辑连接的数据包稳定交付到同一 worker。 | 同步 `QuicServer::serve(runtime: &ServerRuntime, config: ServiceConfig, handler: F)`、QUIC header 路由字段读取、16-bit worker shard 选择、非法或缺失路由键处理、Linux 高性能 reuse-port 路径以及非 Linux 或不可用路径的行为边界。 | 测试或可运行验证展示具备 16-bit QUIC 路由键的数据包被稳定路由到目标 worker，不满足固定 CID layout 的数据包被丢弃，且该入口不提供 TLS、handshake、connection 或 stream API；API 编译覆盖确认 `QuicServer` 只有一个同步 `serve` 入口、必须传入 `&ServerRuntime`，且方法内部不使用 `pending` 挂起。 | 不实现 QUIC 协议栈，不替代 quinn 等上层 QUIC crate，不提供 TLS 配置或 QUIC stream/connection 抽象；不支持可配置 CID layout；不提供无 runtime 参数的 QUIC-aware UDP serve 入口；不把 `serve` 做成异步 lifecycle future。 |
 | P-hyper-static-example | CHG-hyper-static-example | 提供一个 hyper HTTP 静态文件服务器示例，展示上层协议如何使用本 crate 的 TCP 服务入口处理 HTTP 请求。 | `examples/` 示例代码、示例所需 Cargo 依赖或 example target 配置、命令行参数解析、静态根目录解析、基础 HTTP 响应和错误响应。 | `cargo check --example <name>` 或 harness 测试证明示例可编译；可运行验证证明 `--root <path>` 能设置静态根目录，普通文件返回 200，缺失文件返回 404，路径遍历请求不逃逸静态根目录。 | 不把 HTTP 静态服务变成 library API；不承诺生产级静态服务器能力、目录浏览、缓存控制、压缩、range 请求、TLS 或完整 MIME 数据库。 |
+| P-publish-metadata | CHG-publish-metadata | 补齐 crates.io 发布所需的 `Cargo.toml` package 元数据。 | `Cargo.toml` `[package]` 元数据字段、README/LICENSE 引用、源码或文档 URL、keywords/categories，以及不会把无关开发产物打入 package 的发布边界。 | `cargo package --list` 或等价检查证明 manifest 元数据可被 Cargo 接受，README/LICENSE 被包含，package 文件列表不包含 Harness 运行缓存或无关本地产物；人工检查 description/keywords/categories 不扩大 crate 能力承诺。 | 不发布 crate，不修改 crate 公开 API，不改变 runtime feature、依赖、示例行为或测试策略。 |
 
 ## 成功标准
 - 用户可见或系统可见结果：
@@ -150,6 +156,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - 同一个服务实例和同一套 worker 配置可以同时处理 TCP 连接和 UDP 数据包。
   - 用户可以使用 `QuicServer` 入口获得 QUIC-aware UDP 包分配能力；同一 16-bit QUIC worker shard 对应的数据包稳定进入同一 worker，且公开 API 不包含 TLS、handshake、connection 或 stream 配置。
   - 用户可以通过 hyper 静态文件服务器示例指定静态文件根目录并验证基础 HTTP 静态文件响应，同时该示例不改变 crate 公开 API。
+  - crate 的 `Cargo.toml` 包含 crates.io 发布所需 package 元数据，README/LICENSE/source URL 和检索分类准确反映本 crate 能力。
   - server/listener config 不能单独覆盖 worker 数量；worker 数量只由 `ServerRuntime` 配置决定。
   - `TcpServer`、`UdpServer` 和 `QuicServer` 各自只暴露一个同步 `serve` 方法，签名必须接受 `runtime: &ServerRuntime`、`config: ServiceConfig` 和对应 handler；公开 API 不保留 `serve_with_runtime` 或隐式默认 runtime 入口，且 `serve` 内部不通过 `pending` 或等价 future 阻塞调用方。
   - 每个 worker 在独立 OS 线程内运行单线程 async runtime；实现不得依赖调用方当前 runtime 的多线程调度来代表 worker。
@@ -158,6 +165,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - 实现前，approved `proposal.md` 和 `design.md` 都直接映射相关 `change_id`，并通过 schema/admission 检查。
   - 实现后，测试阶段通过生成或更新测试实现、可选 `testing.md`、可选 `testplan.yaml`，覆盖 runtime feature gating、tokio-uring 公开接口可用性、worker 行为、TCP 服务、UDP 服务、QUIC-aware UDP 包分配、listener 动态管理 API 不公开、混合协议 worker、Linux 兼容内部调度、socket 选项配置和平台特定编译验证。
   - `CHG-hyper-static-example` 实现后，测试阶段覆盖示例编译、可配置静态根目录、基础 200/404 响应和路径遍历拒绝。
+  - `CHG-publish-metadata` 实现后，验证 package manifest 与文件列表满足发布前检查，并确认元数据没有扩大公开 API 或协议能力承诺。
   - 已实现变更集的 canonical harness 测试命令通过；若某个平台特定验证路径为 manual，必须明确记录原因。
 - 明确非目标：
   - 不提供通用协议解析器、TLS 栈、QUIC 协议栈、连接池、限流器、超时管理器、重试系统或跨 worker channel 抽象。
@@ -183,6 +191,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | runtime/integration | yes | 变更 UDP/TCP worker 分配、reuse-port 行为、Linux 兼容 fallback 调度和 listener lifecycle。 | design 需描述 Linux 兼容调度输入、路由生命周期、失败行为和 fallback；post-implementation testing 需覆盖 unit/DV/integration 路径。 | none | design 阶段先补齐实现边界；实现后 testing 阶段补齐验证。 | 高负载和平台差异风险需后续验证。 |
 | build/dependency/config/deployment | yes | Linux 高性能路径可能引入 eBPF/CBPF 相关 build、feature 或平台配置。 | design 需声明 feature/dependency/config 表面；post-implementation testing 需包含可复现构建或配置验证。 | none | design 阶段先补齐实现边界；实现后 testing 阶段补齐验证。 | eBPF 依赖和权限模型未定。 |
 | build/dependency/config/deployment | yes | 新增 `runtime-tokio-uring` feature 会引入 tokio-uring 依赖、Linux 平台 cfg 和互斥 feature 组合。 | design 需声明依赖版本、feature 互斥规则、非 Linux 行为和 worker runtime 启动方式；post-implementation testing 需覆盖 feature 编译矩阵和 tokio-uring handler API。 | none | design 阶段先补齐实现边界；实现后 testing 阶段补齐验证。 | tokio-uring 依赖和平台限制未设计前不能进入实现。 |
+| build/dependency/config/deployment | yes | crates.io 发布元数据会改变 Cargo package manifest 和发布前检查结果。 | design 需明确具体 package metadata 字段、发布文件包含/排除边界和验证命令；implementation 需只改 manifest/package 资源；post-implementation testing 或 acceptance 需记录 package manifest/list 检查证据。 | none | design 阶段先补齐发布元数据字段；实现后验证 package 列表。 | URL、keywords 或 categories 若未确认，可能导致发布页面误导或发布失败。 |
 | ui/datamodel/workflow | no | crate 无 UI。 | none | none | none | none |
 | harness/process | no | 不修改 harness rules、scripts、schema 或流程。 | none | none | none | none |
 
@@ -229,6 +238,10 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | FU-038 | implementation | 仅在 proposal/design 重新批准且 `CHG-hyper-static-example` 实现准入通过后，新增或更新 `examples/` 中的 hyper 静态文件服务器示例及必要 Cargo 示例依赖；相关测试代码和测试元数据在后续 testing 阶段同步。 | P-hyper-static-example | yes |
 | FU-039 | testing | 为 `CHG-hyper-static-example` 增加测试计划或测试实现，覆盖示例编译、参数设置静态根目录、普通文件响应、缺失文件响应和路径遍历拒绝。 | P-hyper-static-example | yes |
 | FU-040 | acceptance | 示例实现和验证完成后，审计 proposal、design、代码、测试和运行结果是否一致，特别检查示例没有扩大 library API 范围。 | P-hyper-static-example | yes |
+| FU-041 | design | 定义 `CHG-publish-metadata` 的具体 Cargo package 字段、URL 取值、keywords/categories、README/LICENSE 引用和 package include/exclude 边界。 | P-publish-metadata | yes |
+| FU-042 | implementation | 仅在 proposal/design 重新批准且 `CHG-publish-metadata` 实现准入通过后，更新 `Cargo.toml` 发布元数据和必要 package 边界。 | P-publish-metadata | yes |
+| FU-043 | testing | 为 `CHG-publish-metadata` 记录或执行 package manifest/list 验证，确认 README/LICENSE 包含且无本地缓存或无关产物进入包。 | P-publish-metadata | yes |
+| FU-044 | acceptance | 发布元数据实现和验证完成后，审计 manifest、README/LICENSE、package 列表和 proposal/design 是否一致。 | P-publish-metadata | yes |
 
 ## 提案护栏
 - Proposal 阶段任务仅修改 `proposal.md`，除非用户明确要求多阶段更新。

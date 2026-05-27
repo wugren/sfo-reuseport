@@ -7,7 +7,7 @@
 - Auto-confirm completed document stages: yes
 - Version: v0.1
 - Module(s): sfo-reuseport
-- change_id values: CHG-server-runtime, CHG-tcp-serve, CHG-udp-runtime-socket, CHG-quic-routed-udp, CHG-tokio-uring-runtime
+- change_id values: CHG-server-runtime, CHG-tcp-serve, CHG-udp-runtime-socket, CHG-quic-routed-udp, CHG-tokio-uring-runtime, CHG-publish-metadata
 
 ## Acceptance Baseline
 - Final acceptance is judged against:
@@ -86,6 +86,11 @@
 | I-15 | implementation | complete | delete `ServerRuntimeInner.listeners` and dependent public listener management API | `src/core/server_runtime.rs`, `src/core/tcp.rs`, `src/core/udp.rs`, public exports | root | D-15, admission-check passed | production code | implementation complete; `cargo check` and `sfo-reuseport all` passed; stage-scope blocked by aggregate working-tree baseline |
 | T-15 | testing | confirmed | update listener API tests and metadata for serve-only registration | tests, `testing.md`, `testplan.yaml` | root | I-15 | tests and testing docs | testing updated and auto-confirmed; `sfo-reuseport unit`, `integration`, and `all` passed; stage-scope blocked by aggregate working-tree baseline |
 | A-15 | acceptance | needs changes | audit serve-only listener lifecycle evidence chain | listener registry removal final | root | T-15 | `docs/versions/v0.1/reviews/sfo-reuseport-v0.1-listener-registry-removal-acceptance.md` | behavior accepted by evidence; strict final process acceptance blocked by stage-scope aggregate baseline |
+| P-16 | proposal | confirmed | add crates.io publish metadata requirement | Cargo package metadata and publish file boundary | root | user auto-pipeline continuation | `proposal.md` | proposal updated and user-approved; schema-check passed |
+| D-16 | design | confirmed | map publish metadata to concrete Cargo manifest fields and package list expectations | `Cargo.toml` package metadata | root | P-16 | `design.md` | design updated and auto-confirmed; schema-check and admission-check passed; stage-scope blocked by aggregate working-tree baseline |
+| I-16 | implementation | complete | add package metadata and include boundary | `Cargo.toml` | root | D-16, admission-check passed | manifest metadata | implementation complete; `cargo metadata` passed |
+| T-16 | testing | confirmed | verify package metadata and package file list | cargo metadata/package list evidence | root | I-16 | command evidence | `cargo metadata --no-deps --format-version 1` and `cargo package --list --allow-dirty` passed |
+| A-16 | acceptance | complete | audit publish metadata evidence chain | publish metadata final | root | T-16 | `docs/versions/v0.1/reviews/sfo-reuseport-v0.1-publish-metadata-acceptance.md` | accepted; no manifest or package-list mismatch found; uv unavailable and stage-scope blocked by aggregate working-tree baseline |
 
 ## Submodule Tasks
 | Task ID | Stage | Status | Responsibility | Submodule | Parent Task | Depends On | Output | Done Condition |

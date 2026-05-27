@@ -2,6 +2,22 @@
 name = "sfo-reuseport"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Multi-worker TCP and UDP services with reuse-port style socket distribution"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/wugren/sfo-reuseport"
+homepage = "https://github.com/wugren/sfo-reuseport"
+documentation = "https://docs.rs/sfo-reuseport"
+keywords = ["reuseport", "socket", "udp", "tcp", "runtime"]
+categories = ["network-programming", "asynchronous"]
+include = [
+    "src/**",
+    "examples/**",
+    "README.md",
+    "LICENSE",
+    "Cargo.toml",
+]
 
 [features]
 default = ["runtime-tokio"]
@@ -12,14 +28,14 @@ runtime-tokio-uring = ["dep:tokio", "dep:tokio-uring", "tokio/sync", "tokio/time
 [dependencies]
 async-executor = { version = "1.14", optional = true }
 async-std = { version = "1.13", optional = true, features = ["attributes"] }
-num_cpus = "1.16"
-socket2 = { version = "0.5", features = ["all"] }
-tokio = { version = "1.45", optional = true, features = ["fs", "net", "rt", "rt-multi-thread", "macros", "time"] }
+num_cpus = "1.17"
+socket2 = { version = "0.6", features = ["all"] }
+tokio = { version = "1", optional = true, features = ["fs", "net", "rt", "rt-multi-thread", "macros", "time"] }
 
 [dev-dependencies]
-bytes = "1.10"
+bytes = "1.11"
 http-body-util = "0.1"
-hyper = { version = "1.6", features = ["http1", "server"] }
+hyper = { version = "1.9", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

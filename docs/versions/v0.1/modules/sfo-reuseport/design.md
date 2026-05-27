@@ -4,7 +4,7 @@ submodule:
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-05-26T16:04:07Z
+approved_at: 2026-05-26T17:30:13Z
 ---
 
 # sfo-reuseport 设计
@@ -24,6 +24,7 @@ approved_at: 2026-05-26T16:04:07Z
 - 定义 `ServerRuntime` 运行期抽象；公开 API 不提供 listener 动态管理面，TCP/UDP/QUIC-aware UDP listener 通过单协议 `serve` 入口注册并随 runtime 生命周期停止。
 - 定义 `QuicServer` 作为 QUIC-aware UDP 包分配入口；该入口只解析足够的 QUIC header 路由字段来选择 worker，不实现 TLS、handshake、connection 或 stream。
 - 定义一个 `examples/hyper_static.rs` 示例，用 hyper 在 `TcpServer` 回调中处理 HTTP 静态文件请求，并允许通过命令行参数设置静态文件根目录和监听地址。
+- 定义 crates.io 发布所需的 Cargo package 元数据和 package 文件包含边界，不改变 crate 公开 API、依赖或运行行为。
 
 ### 非目标
 - 不实现协议解析、TLS、连接池、限流、超时、重试或跨 worker 通信。
@@ -33,6 +34,7 @@ approved_at: 2026-05-26T16:04:07Z
 - 不提供配置文件热加载、外部配置订阅或按协议独立线程池。
 - 不把 `QuicServer` 设计成完整 QUIC 协议栈，不引入 quinn、TLS 配置、QUIC connection/stream API 或应用协议处理。
 - 不把 hyper 静态文件能力提升为 library API；示例不提供生产级缓存、压缩、range 请求、目录浏览、TLS 或完整 MIME 数据库。
+- 不执行 `cargo publish`，不引入发布自动化脚本，不用 package 元数据承诺 HTTP、TLS 或完整 QUIC server 能力。
 
 ## 总体方案
 `sfo-reuseport` 公开一个小型 builder/config API。调用方创建 `ServerRuntime`，由 runtime 初始化共享 worker 数，再通过单协议 TCP/UDP/QUIC-aware UDP 入口显式借用该 runtime 注册 listener。公开 API 中每个 server 类型只保留一个同步 `serve(&ServerRuntime, ServiceConfig, handler)` 方法，不再提供无 runtime 参数的默认启动入口、`serve_with_runtime` 并列入口或按 listener id 增删的动态管理面。`serve` 完成 socket bind 和 worker loop 提交后返回 `Result<(), Error>`，不在方法内部 await `pending` 或其他永不完成的 lifecycle future；服务生命周期由 `ServerRuntime` 持有。
@@ -49,6 +51,8 @@ approved_at: 2026-05-26T16:04:07Z
 
 `examples/hyper_static.rs` 是 consumer 示例，不进入 crate 公开 API。示例创建 `ServerRuntime`，通过 `TcpServer::serve(&runtime, config, handler)` 接收 runtime 原生 `TcpStream`，再使用 hyper 的 HTTP/1 connection 服务处理请求。示例参数支持 `--root <path>` 和 `--addr <socket-addr>`；未提供时 `--root` 默认当前目录，`--addr` 默认 `127.0.0.1:8080`。请求路径按 URL path segment 逐段解析并拒绝 `..`、Windows prefix/root、空 NUL 等逃逸静态根目录的输入；目录请求尝试追加 `index.html`；普通文件返回 `200`，缺失路径返回 `404`，非法路径返回 `403`。
 
+发布元数据只修改 `Cargo.toml` 的 package metadata。`description` 使用一句准确描述 multi-worker TCP/UDP reuse-port runtime 的短句；`license` 指向根目录 MIT 许可证；`readme` 指向 `README.md`；`repository` 和 `homepage` 使用 Git remote `https://github.com/wugren/sfo-reuseport`；`documentation` 使用 docs.rs 的 crate 页面 `https://docs.rs/sfo-reuseport`；`keywords` 和 `categories` 选择 crates.io 接受的少量检索项，限定在 async、networking、reuse-port、socket 和 runtime 能力内。为避免发布包包含 Harness 缓存、review 流程产物或本地生成文件，manifest 使用 `include` 显式保留 `src/`、`examples/`、`README.md`、`LICENSE` 和 `Cargo.toml`；验证时允许 Cargo 自动加入 `.cargo_vcs_info.json`、`Cargo.lock` 和规范化 manifest 用的 `Cargo.toml.orig`。
+
 ## 简化检查
 - 最小充分方案：使用 feature-gated runtime 模块、一个共享 core 层和 cfg-gated platform 层，不引入插件系统或动态分发平台后端；tokio-uring 作为第三个互斥 runtime adapter，而不是新增一套 public server API。
 - 复用的既有组件或模式：Rust 标准库 socket 地址类型、feature gating、`cfg(target_os)`、`Arc` 和 async callback future。
@@ -58,6 +62,7 @@ approved_at: 2026-05-26T16:04:07Z
   - Linux 兼容内部调度函数：统一 TCP/UDP 在没有可用 `SO_REUSEPORT` worker 分配能力时的 worker 选择语义。
   - socket 初始化回调：让调用方在不接管 socket 所有权的前提下设置尚未成为稳定 `SocketOptions` 字段的创建期 socket 参数。
   - `QuicServer`：复用 UDP socket handle 但提供独立公开入口，避免把普通 UDP 回调语义和 QUIC-aware 包路由语义混在一个 bool 配置里。
+  - 无新增发布抽象：package metadata 是 Cargo 原生 manifest 字段，不需要额外脚本或配置层。
 - 每个新增抽象的必要性：
   - runtime 抽象是互斥 feature 和同形 API 的直接要求；tokio-uring 的 driver 初始化和 socket API 与 tokio 不同，必须由独立 adapter 隔离。
   - 平台接口是跨平台屏蔽 socket 差异的直接要求。
@@ -74,6 +79,7 @@ approved_at: 2026-05-26T16:04:07Z
 - `src/core/`、`src/runtime/` 和 `src/platform/` 分别承载领域逻辑、async runtime 适配和平台 socket 行为。
 - `examples/tcp_echo.rs` 是示例 binary，必须使用 `ServerRuntimeConfig` 配置 worker。
 - `examples/hyper_static.rs` 是新增示例 binary，必须使用 `ServerRuntime` 和 `TcpServer`，并把 HTTP/静态文件逻辑限制在示例内。
+- `Cargo.toml` 还需要声明 crates.io 发布元数据；当前 manifest 已有 name/version/edition/features/dependencies，但缺少 description、license、readme、repository/homepage/documentation、keywords/categories 和明确 package include 边界。
 
 ## 模块拆分
 这些是 crate 内部 Rust 模块，不是 Harness 直接子模块包。
@@ -110,6 +116,7 @@ approved_at: 2026-05-26T16:04:07Z
 | CHG-mixed-protocol-workers | P-mixed-protocol-workers | TCP/UDP listener 可通过各自 `serve` 入口注册到同一 `ServerRuntime` 实例并在同一 runtime executor 上运行。 | `src/core/tcp.rs`、`src/core/udp.rs`、`src/runtime/` | 保持混合协议共享 worker，不依赖公开 add listener API。 | 不提供按协议独立线程池或负载感知调度。 |
 | CHG-quic-routed-udp | P-quic-routed-udp | 同步 `QuicServer::serve(&ServerRuntime, ServiceConfig, handler)`、固定 QUIC DCID 前 2 字节 big-endian `u16` worker shard 解析、非法 packet 丢弃、Linux reuse-port eBPF selector 的 best-effort worker 预分配、CBPF fallback、用户态稳定 worker 投递 fallback 和 listener 删除语义；注册完成后立即返回启动结果。 | `src/core/udp.rs`、`src/core/mod.rs`、`src/lib.rs`、`src/platform/`、`tests/unit/`、`tests/dv/`、`tests/integration/` | 新增 QUIC-aware UDP routing API；不改变 `UdpServer` 裸 UDP API；`QuicServer` 也只通过显式 runtime 同步 `serve` 暴露；Linux 可用时优先尝试内核 reuse-port eBPF 预分配，eBPF 加载或 attach 失败时退回 CBPF，再失败时退回用户态路由；外部使用者必须按固定 CID layout 生成 server CID。 | 不实现 TLS、handshake、connection、stream、congestion control 或 quinn 集成；不支持可配置 CID layout；不把 eBPF/CBPF 加载失败暴露为公开 API 或强制启动失败；不保留 `serve_with_runtime`；不在 `serve` 内部使用 `pending`。 |
 | CHG-hyper-static-example | P-hyper-static-example | `examples/hyper_static.rs` 使用 hyper HTTP/1 connection API 包装 `TcpServer` 交付的 TCP stream；示例解析 `--root <path>` 和 `--addr <socket-addr>`，将 URL path 映射到静态根目录内文件，目录请求尝试 `index.html`，非法路径拒绝，缺失文件返回 404。 | `Cargo.toml`、`examples/hyper_static.rs`、`tests/` 或 harness 可达的示例验证 | 新增示例 binary 和 example-only 依赖；不改变 `src/` 公开 API。 | 依赖允许使用 `hyper`、`hyper-util`、`http-body-util` 和 `bytes`；参数解析用标准库，避免新增 CLI 依赖。 |
+| CHG-publish-metadata | P-publish-metadata | `Cargo.toml` `[package]` 增加 description、license、readme、repository、homepage、documentation、keywords、categories、rust-version 和 package include 边界。 | `Cargo.toml` | 只影响 Cargo 发布页面和 package 文件列表；不改变公开 Rust API、feature、依赖解析或运行时行为。 | `license = "MIT"` 对应根目录 `LICENSE`；`repository/homepage = "https://github.com/wugren/sfo-reuseport"`；`documentation = "https://docs.rs/sfo-reuseport"`；`readme = "README.md"`；`rust-version = "1.85"` 匹配 Rust 2024 edition；`include` 保留 `src/**`、`examples/**`、`README.md`、`LICENSE`、`Cargo.toml`，并允许 Cargo 自动加入 `.cargo_vcs_info.json`、`Cargo.lock` 和 `Cargo.toml.orig`。 |
 
 ## 实施顺序
 | 阶段 | 目标 | 前置条件 | 输出 | 依赖 | 可并行 |
@@ -124,6 +131,7 @@ approved_at: 2026-05-26T16:04:07Z
 | 8 | 实现 `QuicServer` QUIC-aware UDP 包路由入口。 | 阶段 1-7 | `QuicServer`、QUIC DCID worker shard 解析、跨 worker 稳定投递验证。 | udp、worker、runtime | no |
 | 9 | 增加 tokio-uring runtime adapter。 | 阶段 1-8，`CHG-tokio-uring-runtime` admission 通过。 | `runtime-tokio-uring` feature、tokio-uring socket 类型映射、Linux cfg 编译边界和 handler API 验证。 | runtime、tcp、udp、platform | no |
 | 10 | 增加 hyper 静态文件服务器示例。 | `CHG-hyper-static-example` admission 通过，`TcpServer` 与 `ServerRuntime` 可用。 | `examples/hyper_static.rs`、必要 example 依赖和示例验证。 | tcp、runtime、Cargo example deps | no |
+| 11 | 补齐 crates.io 发布元数据。 | `CHG-publish-metadata` admission 通过。 | `Cargo.toml` package metadata 和 include 边界。 | none | yes |
 
 ## 关键决策
 - 使用 compile-time feature 选择 runtime，而不是 runtime trait object。原因是公开回调必须包含当前 runtime 的原生 `TcpStream`/UDP socket 类型，动态抽象会迫使 API 失去原生类型。
@@ -140,6 +148,7 @@ approved_at: 2026-05-26T16:04:07Z
 - 强约束由固定公开契约和运行时拒绝共同形成：上层 QUIC crate 必须在 server CID 的 DCID 前 2 字节写入 big-endian worker shard；`QuicServer` 不提供可配置 layout、fallback 推断或来源地址兜底，所有不满足 layout 的 packet 都不会进入用户 handler。
 - `QuicServer` v0.1 在 Linux 上先尝试 best-effort reuse-port eBPF selector：为每个 worker 创建绑定到同一地址的 UDP socket，加载 `BPF_PROG_TYPE_SK_REUSEPORT` 程序并通过 `SO_ATTACH_REUSEPORT_EBPF` 附加到 reuse-port group。eBPF 程序只读取 QUIC 固定 shard layout 并返回 `shard % worker_count`，让内核优先把合法 packet 送到目标 worker socket。eBPF 加载、verifier、权限或 attach 失败时不改变公开 API，继续尝试当前 classic BPF selector；CBPF 也失败、平台不支持或 socket 组创建失败时退回可移植用户态稳定分发路径。worker loop 仍在用户态解析 route key；非法 packet、BPF fallback packet 或未进入目标 worker 的 packet 不调用 handler。
 - hyper 静态文件服务器示例使用标准库解析命令行，避免新增 CLI 依赖。路径解析基于 URL path segment，不对请求路径做字符串拼接；示例只从静态根目录读取普通文件或目录下的 `index.html`。Content-Type 可以用少量扩展名映射提供常见值，未知扩展名使用 `application/octet-stream`。
+- 发布元数据不增加新依赖。`keywords` 使用 `reuseport`、`socket`、`udp`、`tcp`、`runtime`，`categories` 使用 `network-programming` 和 `asynchronous`。这些字段只用于检索，不作为功能开关或 API 承诺。
 
 ## 数据与状态
 ### 配置类型
@@ -310,6 +319,7 @@ pub(crate) trait PlatformSocketOps {
 - `http-body-util` 和 `bytes`：仅作为示例依赖，用于构造固定响应 body。
 - 新依赖只在实现阶段按此设计加入；若发现需要额外依赖，必须先更新 design。
 - `socket2` 已是平台 socket 设置依赖；公开回调类型可以引用 `socket2::Socket`，不需要新增依赖。
+- 发布元数据不改变依赖接口。Cargo package 验证使用 `cargo package --list --allow-dirty` 或等价命令查看发布文件列表；不执行实际发布。
 
 ## 实现布局
 ```text
@@ -374,6 +384,7 @@ sfo-reuseport
 - `QuicServer` 命名风险：公开文档和测试必须证明它只提供 QUIC-aware UDP routing，不提供完整 QUIC server。回滚时可移除 `QuicServer` re-export 和入口，不影响 `UdpServer`。
 - QUIC 路由键解析风险：来自网络的 packet 必须做长度检查，非法、缺失或短于 16-bit worker shard 的路由键时丢弃，不得 panic 或调用 handler。eBPF/CBPF selector 仅作为 Linux 内核预分配优化；用户态 worker loop 仍保留 route key 校验，确保 verifier、权限或 selector attach 差异不会改变非法 packet 丢弃语义。
 - 静态文件示例路径逃逸风险：示例必须拒绝 `..`、绝对路径、Windows prefix/root 和 NUL 输入，并在最终 canonicalize 后确认目标路径仍位于静态根目录内。回滚时可删除 `examples/hyper_static.rs` 和对应 example 依赖，不影响 library crate。
+- 发布元数据风险：URL、keywords 或 categories 不准确会误导 crates.io 使用者。通过使用 git remote、README/LICENSE 和 crates.io 支持的通用分类降低风险；回滚时删除新增 package metadata/include 字段即可，不影响代码。
 
 ## 下游跟进
 | follow_up_id | 归属阶段 | 原因 | 触发设计项 | 阻塞 |
@@ -391,6 +402,8 @@ sfo-reuseport
 | FU-DESIGN-012 | testing | 为 `CHG-tokio-uring-runtime` 增加验证，覆盖 feature 互斥、非 Linux cfg 边界、公开 socket 类型、handler 调用 tokio-uring API 和 unified harness 可达性。 | tokio-uring runtime adapter | yes |
 | FU-DESIGN-013 | implementation | 在 `CHG-hyper-static-example` admission 通过后，新增 hyper 静态文件服务器示例和必要 example 依赖。 | hyper static example | yes |
 | FU-DESIGN-014 | testing | 为 `CHG-hyper-static-example` 增加验证，覆盖示例编译、`--root` 参数、200/404/403 响应和 unified harness 可达性。 | hyper static example | yes |
+| FU-DESIGN-015 | implementation | 在 `CHG-publish-metadata` admission 通过后，更新 `Cargo.toml` package metadata 和 include 边界。 | publish metadata | yes |
+| FU-DESIGN-016 | testing | 为 `CHG-publish-metadata` 记录 package 文件列表验证，确认 README/LICENSE/src/examples/Cargo.toml 被包含且 Harness 缓存不进入 package。 | publish metadata | yes |
 
 ## 设计护栏
 - 不要在 `design.md` 中改写已批准的 proposal 意图。
