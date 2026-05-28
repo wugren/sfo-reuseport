@@ -1,4 +1,6 @@
 use std::future::Future;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use sfo_reuseport::{
     Error, PacketMeta, QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer,
@@ -38,10 +40,40 @@ fn server_entrypoints_are_public() {
         });
     let quic: Result<QuicServer, Error> =
         QuicServer::serve(&runtime, config, |_socket, _meta, _payload| async { Ok(()) });
+    let (udp_tx, udp_rx) = mpsc::channel();
+    let (quic_tx, quic_rx) = mpsc::channel();
+    let udp_socket: Result<UdpServer, Error> = UdpServer::serve_socket(
+        &runtime,
+        ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        move |socket| {
+            let udp_tx = udp_tx.clone();
+            async move {
+                udp_tx.send(socket.local_addr()?).unwrap();
+                Ok(())
+            }
+        },
+    );
+    let quic_socket: Result<QuicServer, Error> = QuicServer::serve_socket(
+        &runtime,
+        ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        move |socket| {
+            let quic_tx = quic_tx.clone();
+            async move {
+                quic_tx.send(socket.local_addr()?).unwrap();
+                Ok(())
+            }
+        },
+    );
 
     tcp.unwrap().close().unwrap();
     udp.unwrap().close().unwrap();
     quic.unwrap().close().unwrap();
+    let udp_socket = udp_socket.unwrap();
+    let quic_socket = quic_socket.unwrap();
+    assert!(udp_rx.recv_timeout(Duration::from_secs(2)).is_ok());
+    assert!(quic_rx.recv_timeout(Duration::from_secs(2)).is_ok());
+    udp_socket.close().unwrap();
+    quic_socket.close().unwrap();
 }
 
 #[test]
@@ -61,8 +93,10 @@ fn serve_entrypoints_are_synchronous_and_do_not_pending() {
 
     assert!(tcp.contains("pub fn serve"));
     assert!(udp.contains("pub fn serve"));
+    assert!(udp.contains("pub fn serve_socket"));
     assert!(!tcp.contains("pub async fn serve"));
     assert!(!udp.contains("pub async fn serve"));
+    assert!(!udp.contains("pub async fn serve_socket"));
     assert!(!tcp.contains("std::future::pending"));
     assert!(!udp.contains("std::future::pending"));
     assert!(!tcp.contains("pending::<"));

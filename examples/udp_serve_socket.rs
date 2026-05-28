@@ -1,7 +1,9 @@
 use std::env;
 use std::net::SocketAddr;
 
-use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, ServiceConfig, UdpServer};
+use sfo_reuseport::{
+    Error, ServerRuntime, ServerRuntimeConfig, ServiceConfig, UdpServer, UdpSocket,
+};
 
 #[cfg(feature = "runtime-tokio")]
 #[tokio::main]
@@ -25,25 +27,27 @@ async fn run() -> Result<(), Error> {
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(args.workers))?;
     let config = ServiceConfig::new(args.addr);
 
-    eprintln!("udp echo server listening on {}", args.addr);
+    eprintln!(
+        "udp serve_socket echo server listening on {} with {} worker(s)",
+        args.addr, args.workers
+    );
 
-    UdpServer::serve(&runtime, config, |socket, meta, payload| async move {
-        let Some(peer_addr) = meta.peer_addr else {
-            return Ok(());
-        };
-        send_echo(socket, payload, peer_addr).await
+    let _server = UdpServer::serve_socket(&runtime, config, |socket| async move {
+        serve_socket_echo(socket).await
     })?;
 
     std::future::pending::<Result<(), Error>>().await
 }
 
-async fn send_echo(
-    socket: sfo_reuseport::UdpSocket,
-    payload: Vec<u8>,
-    peer_addr: SocketAddr,
-) -> Result<(), Error> {
-    socket.send_to(&payload, peer_addr).await?;
-    Ok(())
+async fn serve_socket_echo(socket: UdpSocket) -> Result<(), Error> {
+    let local_addr = socket.local_addr()?;
+    eprintln!("worker received UDP socket for {local_addr}");
+
+    let mut buffer = vec![0_u8; 2048];
+    loop {
+        let (len, peer_addr) = socket.recv_from(&mut buffer).await?;
+        socket.send_to(&buffer[..len], peer_addr).await?;
+    }
 }
 
 struct Args {
@@ -53,7 +57,7 @@ struct Args {
 
 impl Args {
     fn parse() -> Result<Self, Error> {
-        let mut addr = "127.0.0.1:7001"
+        let mut addr = "127.0.0.1:7002"
             .parse()
             .map_err(|error| Error::InvalidConfig(format!("invalid default address: {error}")))?;
         let mut workers = 4;
@@ -99,5 +103,7 @@ impl Args {
 }
 
 fn print_usage() {
-    println!("Usage: cargo run --example udp_server -- [--addr <addr>] [--workers <count>]");
+    println!(
+        "Usage: cargo run --example udp_serve_socket -- [--addr <addr>] [--workers <count>]"
+    );
 }

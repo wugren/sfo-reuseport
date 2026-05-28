@@ -298,10 +298,30 @@ pub fn udp_socket_from_std(socket: StdUdpSocket) -> io::Result<UdpSocket> {
 
 pub async fn udp_recv_from(
     socket: &UdpSocket,
-    buffer: &mut Vec<u8>,
+    buffer: Vec<u8>,
+) -> io::Result<(usize, SocketAddr, Vec<u8>)> {
+    let (result, recv_buffer) = socket.recv_from(buffer).await;
+    let (len, peer_addr) = result?;
+    Ok((len, peer_addr, recv_buffer))
+}
+
+pub async fn udp_recv_from_slice(
+    socket: &UdpSocket,
+    buffer: &mut [u8],
 ) -> io::Result<(usize, SocketAddr)> {
-    let recv_buffer = std::mem::take(buffer);
-    let (result, recv_buffer) = socket.recv_from(recv_buffer).await;
-    *buffer = recv_buffer;
+    let mut recv_buffer = vec![0_u8; buffer.len()];
+    let (len, peer_addr, returned_buffer) = udp_recv_from(socket, recv_buffer).await?;
+    recv_buffer = returned_buffer;
+    buffer[..len].copy_from_slice(&recv_buffer[..len]);
+    Ok((len, peer_addr))
+}
+
+pub async fn udp_send_to(
+    socket: &UdpSocket,
+    buffer: &[u8],
+    target: SocketAddr,
+) -> io::Result<usize> {
+    let send_buffer = buffer.to_vec();
+    let (result, _send_buffer) = socket.send_to(send_buffer, target).await;
     result
 }

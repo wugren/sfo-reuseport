@@ -1,6 +1,10 @@
 use std::net::UdpSocket as StdUdpSocket;
+use std::sync::mpsc;
+use std::time::Duration;
 
-use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, ServiceConfig, UdpServer};
+use sfo_reuseport::{
+    Error, QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig, UdpServer,
+};
 
 fn free_addr() -> std::net::SocketAddr {
     let socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
@@ -30,4 +34,65 @@ async fn udp_loopback_serve_receives_packet_and_sends_response() {
     let (len, _) = client.recv_from(&mut buffer).await.unwrap();
     assert_eq!(&buffer[..len], b"pong");
     server.abort();
+}
+
+#[tokio::test]
+async fn udp_server_serve_socket_returns_socket_for_application_recv() {
+    let addr = free_addr();
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let (socket_tx, socket_rx) = mpsc::channel();
+    let server = UdpServer::serve_socket(&runtime, ServiceConfig::new(addr), move |socket| {
+        let socket_tx = socket_tx.clone();
+        async move {
+            socket_tx.send(socket).unwrap();
+            Ok(())
+        }
+    })
+    .unwrap();
+    let socket = socket_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let local_addr = socket.local_addr().unwrap();
+
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.send_to(b"socket-only", local_addr).await.unwrap();
+
+    let buffer = vec![0_u8; 32];
+    let (len, peer_addr, buffer) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from_vec(buffer))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(&buffer[..len], b"socket-only");
+    assert_eq!(peer_addr, client.local_addr().unwrap());
+    server.close().unwrap();
+}
+
+#[tokio::test]
+async fn quic_server_serve_socket_delivers_quic_routable_packet_to_application_socket() {
+    let addr = free_addr();
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let (socket_tx, socket_rx) = mpsc::channel();
+    let server = QuicServer::serve_socket(&runtime, ServiceConfig::new(addr), move |socket| {
+        let socket_tx = socket_tx.clone();
+        async move {
+            socket_tx.send(socket).unwrap();
+            Ok(())
+        }
+    })
+    .unwrap();
+    let socket = socket_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let local_addr = socket.local_addr().unwrap();
+
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let packet = [0xc0, 0, 0, 0, 1, 4, 0, 0, b'p', b'i', b'n', b'g'];
+    client.send_to(&packet, local_addr).await.unwrap();
+
+    let mut buffer = [0_u8; 32];
+    let (len, peer_addr) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(&buffer[..len], &packet);
+    assert_eq!(peer_addr, client.local_addr().unwrap());
+    server.close().unwrap();
 }

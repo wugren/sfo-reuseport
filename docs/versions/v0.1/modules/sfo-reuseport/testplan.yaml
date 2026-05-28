@@ -55,8 +55,12 @@ levels:
         change_ids: ["CHG-worker-model", "CHG-tcp-serve", "CHG-udp-runtime-socket"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: udp-runtime-socket-api
-        name: UDP handler 和 server listener runtime 原生 UdpSocket API 契约
+        name: UDP handler 和 server listener 统一 UdpSocket API 契约
         change_ids: ["CHG-udp-runtime-socket", "CHG-dynamic-listeners", "CHG-quic-routed-udp"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: udp-quic-socket-only-api
+        name: UdpServer QuicServer socket-only serve API 契约
+        change_ids: ["CHG-udp-quic-listener-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: linux-compatible-scheduling
         name: Linux 兼容内部调度和 Dispatcher API 缺失契约
@@ -89,10 +93,12 @@ levels:
     test_targets:
       - Cargo.toml
       - examples/hyper_static.rs
+      - examples/udp_serve_socket.rs
       - src/lib.rs
       - src/platform
       - tests/dv
       - harness/scripts/test-hyper-static-example.py
+      - harness/scripts/test-udp-serve-socket-example.py
     preconditions:
       tools: []
       env: []
@@ -123,6 +129,10 @@ levels:
       - id: socket-init-callback-dv
         name: 当前平台 TCP UDP bind 路径 socket 初始化回调
         change_ids: ["CHG-socket-init-callback"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
+      - id: udp-serve-socket-example
+        name: UdpServer serve_socket 示例编译和 smoke 验证
+        change_ids: ["CHG-udp-quic-listener-serve", "CHG-udp-runtime-socket"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
       - id: hyper-static-example
         name: hyper 静态文件服务器示例编译和 smoke 验证
@@ -155,8 +165,12 @@ levels:
         change_ids: ["CHG-tcp-serve", "CHG-worker-model"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: udp-loopback-serve
-        name: UDP loopback packet metadata 和 runtime 原生 UdpSocket response path
+        name: UDP loopback packet metadata 和统一 UdpSocket response path
         change_ids: ["CHG-udp-runtime-socket", "CHG-worker-model", "CHG-worker-thread-runtime", "CHG-runtime-features"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: udp-quic-socket-only-serve
+        name: UDP/QUIC socket-only serve 回调交付统一 UdpSocket 并由应用自行 recv
+        change_ids: ["CHG-udp-quic-listener-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: dynamic-listeners
         name: TCP/UDP/QUIC serve 注册、server 对象关闭和 listener 动态管理 API 不公开

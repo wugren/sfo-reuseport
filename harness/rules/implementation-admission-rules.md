@@ -45,6 +45,8 @@
 - Leave test implementation for the post-implementation testing stage unless the user explicitly requested a combined implementation/testing task.
 - Touch only files and lines required by the admitted task.
 - Match surrounding style, naming, and structure.
+- Runtime work MUST stay inside `ServerRuntime` owned worker threads: listener loops, socket I/O, handler dispatch, server lifecycle callbacks, and runtime-owned background work MUST be submitted to the `ServerRuntime` worker executor instead of spawning external threads, external thread pools, caller-runtime tasks, or global-runtime tasks.
+- New production uses of `std::thread::spawn`, `thread::Builder::spawn`, runtime-specific worker creation, or equivalent external execution are allowed only when implementing `ServerRuntime`'s own worker-thread ownership, and only when the approved design and admitted `change_id` directly require that boundary.
 - Do not refactor, reformat, rewrite comments, rename symbols, or clean adjacent code unless the admitted task requires it.
 - Do not add unrequested features, options, extension points, configuration, or defensive handling for scenarios ruled out by approved docs or reachable code paths.
 - Remove only unused imports, variables, functions, or files made unused by the current change.

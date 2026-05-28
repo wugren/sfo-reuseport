@@ -73,6 +73,7 @@ impl ServerRuntime {
     }
 
     #[cfg(feature = "runtime-tokio-uring")]
+    #[allow(dead_code)]
     pub(crate) fn submit_to_executor<T, Fut>(
         executor: &runtime::ExecutorHandle,
         task: T,

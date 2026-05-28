@@ -204,6 +204,13 @@ async fn simulated_tcp_accept_loop(
             break;
         };
         let handler = Arc::clone(&handler);
+        #[cfg(feature = "runtime-tokio-uring")]
+        let submit_result: Result<(), Error> = {
+            let _ = executor;
+            let _ = handler(stream).await;
+            Ok(())
+        };
+        #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
         let submit_result = ServerRuntime::submit_to_executor(executor, move || async move {
             let _ = handler(stream).await;
         });

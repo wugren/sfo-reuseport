@@ -1,5 +1,6 @@
 mod config;
 mod error;
+mod quic;
 mod schedule;
 mod server_runtime;
 mod tcp;
@@ -13,9 +14,10 @@ pub use config::{
     WorkerCount,
 };
 pub use error::Error;
+pub use quic::QuicServer;
 pub use server_runtime::ServerRuntime;
 pub use tcp::TcpServer;
-pub use udp::{PacketMeta, QuicServer, UdpServer};
+pub use udp::{PacketMeta, UdpServer, UdpSocket};
 
 pub(crate) use schedule::linux_reuseport_select;
 

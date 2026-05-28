@@ -150,7 +150,23 @@ pub fn udp_socket_from_std(socket: StdUdpSocket) -> io::Result<UdpSocket> {
 
 pub async fn udp_recv_from(
     socket: &UdpSocket,
-    buffer: &mut Vec<u8>,
+    mut buffer: Vec<u8>,
+) -> io::Result<(usize, SocketAddr, Vec<u8>)> {
+    let (len, peer_addr) = socket.recv_from(buffer.as_mut_slice()).await?;
+    Ok((len, peer_addr, buffer))
+}
+
+pub async fn udp_recv_from_slice(
+    socket: &UdpSocket,
+    buffer: &mut [u8],
 ) -> io::Result<(usize, SocketAddr)> {
-    socket.recv_from(buffer.as_mut_slice()).await
+    socket.recv_from(buffer).await
+}
+
+pub async fn udp_send_to(
+    socket: &UdpSocket,
+    buffer: &[u8],
+    target: SocketAddr,
+) -> io::Result<usize> {
+    socket.send_to(buffer, target).await
 }

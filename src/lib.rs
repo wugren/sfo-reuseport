@@ -31,7 +31,8 @@ pub mod runtime;
 #[cfg(not(all(feature = "runtime-tokio-uring", not(target_os = "linux"))))]
 pub use crate::core::{
     Error, PacketMeta, QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig,
-    SocketInitCallback, SocketOptions, TcpServer, TransparentMode, UdpServer, WorkerCount,
+    SocketInitCallback, SocketOptions, TcpServer, TransparentMode, UdpServer, UdpSocket,
+    WorkerCount,
 };
 #[cfg(not(all(feature = "runtime-tokio-uring", not(target_os = "linux"))))]
-pub use crate::runtime::{spawn, TaskHandle, TcpStream, UdpSocket};
+pub use crate::runtime::{spawn, TaskHandle, TcpStream};
