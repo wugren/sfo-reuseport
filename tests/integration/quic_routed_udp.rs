@@ -32,18 +32,6 @@ fn free_addr() -> std::net::SocketAddr {
     socket.local_addr().unwrap()
 }
 
-fn stable_hash_bytes(bytes: &[u8]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-
-    let mut hash = FNV_OFFSET;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
-
 #[tokio::test]
 async fn quic_server_serve_delivers_long_header_dcid_and_sends_response() {
     disable_quic_bpf_for_test();
@@ -128,7 +116,7 @@ async fn quic_routed_udp_delivers_long_header_dcid_to_target_worker() {
 }
 
 #[tokio::test]
-async fn quic_routed_udp_initial_hash_fallback_matches_followup_prefix() {
+async fn quic_routed_udp_initial_prefix_matches_followup_prefix() {
     disable_quic_bpf_for_test();
     let _guard = QUIC_TEST_LOCK.lock().unwrap();
     let addr = free_addr();
@@ -151,10 +139,9 @@ async fn quic_routed_udp_initial_hash_fallback_matches_followup_prefix() {
     )
     .unwrap();
 
-    let dcid = [8, 7, 6, 5, 4, 3, 2, 1];
-    let expected_worker = (stable_hash_bytes(&dcid) as usize) % 3;
+    let expected_worker = 2;
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let initial = [0xc0, 0, 0, 0, 1, 8, 8, 7, 6, 5, 4, 3, 2, 1];
+    let initial = [0xc0, 0, 0, 0, 1, 8, 0, 2, 6, 5, 4, 3, 2, 1];
     client.send_to(&initial, addr).await.unwrap();
 
     let mut buffer = [0_u8; 8];

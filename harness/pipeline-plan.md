@@ -106,6 +106,11 @@
 | I-19 | implementation | complete | implement fixed 2-byte CID worker index prefix in generator and routing | `src/core/cid.rs`, `src/core/quic.rs`, Linux selector if present | root | D-19, admission-check passed | production code | implementation complete; `cargo check` passed |
 | T-19 | testing | confirmed | verify fixed 2-byte CID prefix generation and routing | unit/API/integration tests and testing docs | root | I-19 | tests and testing docs | `sfo-reuseport all` passed; full Quinn endpoint interop marked ignored/manual under canonical `--test-threads=1` |
 | A-19 | acceptance | complete | audit fixed 2-byte QUIC CID prefix evidence chain | CID routing final | root | T-19 | `docs/versions/v0.1/reviews/sfo-reuseport-v0.1-quic-cid-prefix-acceptance.md` | accepted by behavior; strict process caveats are aggregate stage-scope baseline and missing uv |
+| P-20 | proposal | confirmed | clarify QUIC Initial/0-RTT routing uses DCID prefix modulo instead of hash fallback | QuicServer worker routing baseline | root | user auto-pipeline continuation | `proposal.md` | proposal updated and auto-confirmed; schema-check passed |
+| D-20 | design | confirmed | synchronize QuicServer route selection to long/short header DCID prefix modulo | `src/core/quic.rs`, platform selector consistency | root | P-20 | `design.md` | design updated and auto-confirmed; schema-check passed |
+| I-20 | implementation | complete | implement unified DCID prefix routing for QUIC Initial/0-RTT and follow-up packets | `src/core/quic.rs` | root | D-20, admission-check passed | production code | implementation complete; `cargo check` passed |
+| T-20 | testing | confirmed | verify Initial/0-RTT prefix routing and worker stability | unit/integration tests and testing docs | root | I-20 | tests and testing docs | canonical unit passed; focused integration passed; full integration stopped on pre-existing quinn interop starvation risk |
+| A-20 | acceptance | complete | audit QUIC prefix routing evidence chain | QuicServer routing final | root | T-20 | review report if needed | accepted by focused behavior and document/code/test consistency; strict stage-scope not rerun due aggregate multi-stage pipeline diff |
 
 ## Submodule Tasks
 | Task ID | Stage | Status | Responsibility | Submodule | Parent Task | Depends On | Output | Done Condition |

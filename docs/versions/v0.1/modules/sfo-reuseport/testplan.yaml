@@ -83,7 +83,7 @@ levels:
         change_ids: ["CHG-server-runtime", "CHG-dynamic-listeners", "CHG-mixed-protocol-workers"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: quic-route-key-parsing
-        name: QUIC routed UDP 握手 fallback、路由键解析和非法 packet 边界
+        name: QUIC routed UDP DCID 前缀取模、路由键解析和非法 packet 边界
         change_ids: ["CHG-quic-routed-udp"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: quic-cid-generator
@@ -201,7 +201,7 @@ levels:
         change_ids: ["CHG-server-runtime", "CHG-mixed-protocol-workers", "CHG-dynamic-listeners", "CHG-worker-model", "CHG-worker-thread-runtime"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: quic-routed-udp
-        name: QUIC routed UDP 握手 fallback 和 worker index 前缀稳定投递
+        name: QUIC routed UDP DCID 前缀取模和 worker index 前缀稳定投递
         change_ids: ["CHG-quic-routed-udp", "CHG-udp-runtime-socket", "CHG-worker-model", "CHG-worker-thread-runtime"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: quic-routed-udp-bpf-fallback

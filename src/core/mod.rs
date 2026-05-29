@@ -21,7 +21,7 @@ pub use server_runtime::ServerRuntime;
 pub use tcp::TcpServer;
 pub use udp::{PacketMeta, UdpServer, UdpSocket};
 
-pub(crate) use schedule::{linux_reuseport_select, stable_hash_bytes};
+pub(crate) use schedule::linux_reuseport_select;
 
 #[cfg(feature = "runtime-tokio-uring")]
 pub(crate) type HandlerFutureBox = Pin<Box<dyn Future<Output = Result<(), Error>>>>;

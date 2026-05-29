@@ -5,7 +5,7 @@ use crate::core::udp::{
     PacketMeta, UdpHandler, UdpServerState, UdpSocket, add_socket_callback_simulated_listener,
     is_active, socket_callback, submit_udp_handler, udp_handler,
 };
-use crate::core::{Error, HandlerFuture, ServerRuntime, ServiceConfig, stable_hash_bytes};
+use crate::core::{Error, HandlerFuture, ServerRuntime, ServiceConfig};
 use crate::platform;
 use crate::runtime;
 
@@ -363,9 +363,6 @@ fn quic_worker_index(packet: &[u8], workers: usize) -> Option<usize> {
 
     if packet[0] & 0x80 != 0 {
         let dcid = quic_long_header_dcid(packet)?;
-        if quic_long_header_uses_dcid_hash_fallback(packet[0]) {
-            return quic_dcid_hash_worker(dcid, workers);
-        }
         let worker_index = quic_worker_index_prefix(dcid)?;
         Some(worker_index % workers)
     } else {
@@ -391,17 +388,6 @@ fn quic_long_header_dcid(packet: &[u8]) -> Option<&[u8]> {
     Some(&packet[start..end])
 }
 
-fn quic_long_header_uses_dcid_hash_fallback(first_byte: u8) -> bool {
-    matches!(first_byte & 0x30, 0x00 | 0x10)
-}
-
-fn quic_dcid_hash_worker(dcid: &[u8], workers: usize) -> Option<usize> {
-    if dcid.len() < 8 {
-        return None;
-    }
-    Some((stable_hash_bytes(dcid) as usize) % workers)
-}
-
 fn quic_worker_index_prefix(bytes: &[u8]) -> Option<usize> {
     let first = *bytes.first()?;
     let second = *bytes.get(1)?;
@@ -425,21 +411,15 @@ mod tests {
     }
 
     #[test]
-    fn quic_initial_uses_full_dcid_hash_fallback() {
-        let dcid = [8, 7, 6, 5, 4, 3, 2, 1];
-        let packet = [0xc0, 0, 0, 0, 1, 8, 8, 7, 6, 5, 4, 3, 2, 1];
-        let expected = (stable_hash_bytes(&dcid) as usize) % 4;
-
-        assert_eq!(quic_worker_index(&packet, 4), Some(expected));
+    fn quic_initial_uses_two_byte_worker_index_prefix() {
+        let packet = [0xc0, 0, 0, 0, 1, 8, 0, 2, 6, 5, 4, 3, 2, 1];
+        assert_eq!(quic_worker_index(&packet, 4), Some(2));
     }
 
     #[test]
-    fn quic_zero_rtt_uses_full_dcid_hash_fallback() {
-        let dcid = [1, 3, 5, 7, 9, 11, 13, 15];
-        let packet = [0xd0, 0, 0, 0, 1, 8, 1, 3, 5, 7, 9, 11, 13, 15];
-        let expected = (stable_hash_bytes(&dcid) as usize) % 4;
-
-        assert_eq!(quic_worker_index(&packet, 4), Some(expected));
+    fn quic_zero_rtt_uses_two_byte_worker_index_prefix() {
+        let packet = [0xd0, 0, 0, 0, 1, 8, 0, 3, 5, 7, 9, 11, 13, 15];
+        assert_eq!(quic_worker_index(&packet, 4), Some(3));
     }
 
     #[test]
@@ -460,7 +440,10 @@ mod tests {
         assert_eq!(quic_worker_index(&[0xc0, 0, 0, 0, 1, 0], 4), None);
         assert_eq!(quic_worker_index(&[0xc0, 0, 0, 0, 1, 1, 1], 4), None);
         assert_eq!(quic_worker_index(&[0xc0, 0, 0, 0, 1, 4, 1], 4), None);
-        assert_eq!(quic_worker_index(&[0xc0, 0, 0, 0, 1, 7, 1, 2, 3, 4, 5, 6, 7], 4), None);
+        assert_eq!(
+            quic_worker_index(&[0xc0, 0, 0, 0, 1, 8, 1, 2, 3, 4, 5, 6, 7], 4),
+            None
+        );
         assert_eq!(quic_worker_index(&[0x40], 4), None);
         assert_eq!(quic_worker_index(&[0x40, 0x80], 4), None);
     }
