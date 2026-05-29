@@ -1,3 +1,4 @@
+mod cid;
 mod config;
 mod error;
 mod quic;
@@ -13,13 +14,14 @@ pub use config::{
     ServerRuntimeConfig, ServiceConfig, SocketInitCallback, SocketOptions, TransparentMode,
     WorkerCount,
 };
+pub use cid::QuicCidGenerator;
 pub use error::Error;
 pub use quic::QuicServer;
 pub use server_runtime::ServerRuntime;
 pub use tcp::TcpServer;
 pub use udp::{PacketMeta, UdpServer, UdpSocket};
 
-pub(crate) use schedule::linux_reuseport_select;
+pub(crate) use schedule::{linux_reuseport_select, stable_hash_bytes};
 
 #[cfg(feature = "runtime-tokio-uring")]
 pub(crate) type HandlerFutureBox = Pin<Box<dyn Future<Output = Result<(), Error>>>>;

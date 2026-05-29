@@ -1,6 +1,8 @@
 use std::cell::RefCell;
 use std::future::Future;
 use std::io;
+#[cfg(feature = "quinn")]
+use std::io::IoSliceMut;
 use std::net::{
     SocketAddr,
     TcpListener as StdTcpListener, TcpStream as StdTcpStream, UdpSocket as StdUdpSocket,
@@ -169,4 +171,65 @@ pub async fn udp_send_to(
     target: SocketAddr,
 ) -> io::Result<usize> {
     socket.send_to(buffer, target).await
+}
+
+#[cfg(feature = "quinn")]
+pub fn udp_try_send_to(
+    socket: &UdpSocket,
+    buffer: &[u8],
+    target: SocketAddr,
+) -> io::Result<usize> {
+    let _ = (socket, buffer, target);
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "async-std UDP socket does not expose nonblocking send readiness",
+    ))
+}
+
+#[cfg(feature = "quinn")]
+pub fn udp_poll_send_ready(
+    _socket: &UdpSocket,
+    _cx: &mut std::task::Context<'_>,
+) -> std::task::Poll<io::Result<()>> {
+    std::task::Poll::Ready(Ok(()))
+}
+
+#[cfg(feature = "quinn")]
+pub fn udp_poll_recv_from_slice(
+    socket: &UdpSocket,
+    cx: &mut std::task::Context<'_>,
+    buffer: &mut [u8],
+) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
+    let mut future = Box::pin(socket.recv_from(buffer));
+    future.as_mut().poll(cx)
+}
+
+#[cfg(feature = "quinn")]
+pub fn udp_poll_recv_from_vectored(
+    socket: &UdpSocket,
+    cx: &mut std::task::Context<'_>,
+    buffers: &mut [IoSliceMut<'_>],
+) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
+    let mut buffer = vec![0_u8; 65_536];
+    match udp_poll_recv_from_slice(socket, cx, &mut buffer) {
+        std::task::Poll::Pending => std::task::Poll::Pending,
+        std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
+        std::task::Poll::Ready(Ok((len, peer_addr))) => {
+            scatter_datagram(&buffer[..len], buffers);
+            std::task::Poll::Ready(Ok((len, peer_addr)))
+        }
+    }
+}
+
+#[cfg(feature = "quinn")]
+fn scatter_datagram(payload: &[u8], buffers: &mut [IoSliceMut<'_>]) {
+    let mut offset = 0;
+    for buffer in buffers {
+        if offset >= payload.len() {
+            break;
+        }
+        let copy_len = (payload.len() - offset).min(buffer.len());
+        buffer[..copy_len].copy_from_slice(&payload[offset..offset + copy_len]);
+        offset += copy_len;
+    }
 }

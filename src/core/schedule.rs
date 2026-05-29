@@ -18,6 +18,12 @@ pub(crate) fn linux_reuseport_select(meta: PacketMeta, workers: usize) -> Result
     Ok((hash as usize) % workers)
 }
 
+pub(crate) fn stable_hash_bytes(bytes: &[u8]) -> u64 {
+    let mut hash = FNV_OFFSET;
+    write_bytes(&mut hash, bytes);
+    hash
+}
+
 fn hash_socket_addr(hash: &mut u64, addr: Option<SocketAddr>) {
     let Some(addr) = addr else {
         write_u8(hash, 0);

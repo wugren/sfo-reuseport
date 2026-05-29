@@ -1,6 +1,15 @@
 use std::collections::HashMap;
+#[cfg(all(
+    feature = "quinn",
+    any(feature = "runtime-async-std", feature = "runtime-tokio")
+))]
+use std::future::Future;
 use std::io;
+#[cfg(feature = "quinn")]
+use std::io::IoSliceMut;
 use std::net::{Shutdown, SocketAddr, UdpSocket as StdUdpSocket};
+#[cfg(feature = "quinn")]
+use std::task::{Context, Poll};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -13,7 +22,7 @@ use crate::runtime;
 
 pub(crate) type UdpHandler =
     Arc<dyn Fn(UdpSocket, PacketMeta, Vec<u8>) -> HandlerFutureBox + Send + Sync>;
-pub(crate) type SocketCallback = Arc<dyn Fn(UdpSocket) -> HandlerFutureBox + Send + Sync>;
+pub(crate) type SocketCallback = Arc<dyn Fn(UdpSocket, usize) -> HandlerFutureBox + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct PacketMeta {
@@ -85,6 +94,50 @@ impl UdpSocket {
         }
     }
 
+    #[cfg(feature = "quinn")]
+    pub fn try_send_to(&self, buffer: &[u8], target: SocketAddr) -> io::Result<usize> {
+        match &self.inner {
+            UdpSocketInner::Runtime(socket) => runtime::udp_try_send_to(socket, buffer, target),
+            UdpSocketInner::Routed(socket) => socket.sender.send_to(buffer, target),
+        }
+    }
+
+    #[cfg(feature = "quinn")]
+    pub fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &self.inner {
+            UdpSocketInner::Runtime(socket) => runtime::udp_poll_send_ready(socket, cx),
+            UdpSocketInner::Routed(_socket) => Poll::Ready(Ok(())),
+        }
+    }
+
+    #[cfg(feature = "quinn")]
+    pub fn poll_recv_from(
+        &self,
+        cx: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        match &self.inner {
+            UdpSocketInner::Runtime(socket) => {
+                runtime::udp_poll_recv_from_slice(socket, cx, buffer)
+            }
+            UdpSocketInner::Routed(socket) => socket.poll_recv_from_slice(cx, buffer),
+        }
+    }
+
+    #[cfg(feature = "quinn")]
+    pub fn poll_recv_from_vectored(
+        &self,
+        cx: &mut Context<'_>,
+        buffers: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        match &self.inner {
+            UdpSocketInner::Runtime(socket) => {
+                runtime::udp_poll_recv_from_vectored(socket, cx, buffers)
+            }
+            UdpSocketInner::Routed(socket) => socket.poll_recv_from_vectored(cx, buffers),
+        }
+    }
+
     pub(crate) fn from_runtime(inner: runtime::UdpSocket) -> Self {
         Self {
             inner: UdpSocketInner::Runtime(inner),
@@ -147,6 +200,106 @@ impl RoutedUdpSocket {
                 .map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "routed UDP socket closed"))
         }
     }
+
+    #[cfg(feature = "quinn")]
+    fn poll_recv_from_slice(
+        &self,
+        cx: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        let packet = match self.poll_recv_packet(cx) {
+            Poll::Ready(result) => result,
+            Poll::Pending => return Poll::Pending,
+        };
+        match packet {
+            Ok(packet) => {
+                let len = packet.payload.len().min(buffer.len());
+                buffer[..len].copy_from_slice(&packet.payload[..len]);
+                Poll::Ready(Ok((len, packet.peer_addr)))
+            }
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+
+    #[cfg(feature = "quinn")]
+    fn poll_recv_from_vectored(
+        &self,
+        cx: &mut Context<'_>,
+        buffers: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<(usize, SocketAddr)>> {
+        let packet = match self.poll_recv_packet(cx) {
+            Poll::Ready(result) => result,
+            Poll::Pending => return Poll::Pending,
+        };
+        match packet {
+            Ok(packet) => {
+                scatter_datagram(&packet.payload, buffers);
+                Poll::Ready(Ok((packet.payload.len(), packet.peer_addr)))
+            }
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+
+    #[cfg(feature = "quinn")]
+    fn poll_recv_packet(&self, cx: &mut Context<'_>) -> Poll<io::Result<RoutedPacket>> {
+        #[cfg(feature = "runtime-async-std")]
+        {
+            let mut future = Box::pin(self.receiver.recv());
+            return match future.as_mut().poll(cx) {
+                Poll::Ready(Ok(packet)) => Poll::Ready(Ok(packet)),
+                Poll::Ready(Err(_)) => Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "routed UDP socket closed",
+                ))),
+                Poll::Pending => Poll::Pending,
+            };
+        }
+        #[cfg(feature = "runtime-tokio")]
+        {
+            let mut lock = Box::pin(self.receiver.lock());
+            let mut receiver = match lock.as_mut().poll(cx) {
+                Poll::Ready(receiver) => receiver,
+                Poll::Pending => return Poll::Pending,
+            };
+            let mut recv = Box::pin(receiver.recv());
+            return match recv.as_mut().poll(cx) {
+                Poll::Ready(Some(packet)) => Poll::Ready(Ok(packet)),
+                Poll::Ready(None) => Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "routed UDP socket closed",
+                ))),
+                Poll::Pending => Poll::Pending,
+            };
+        }
+        #[cfg(feature = "runtime-tokio-uring")]
+        {
+            let _ = cx;
+            let receiver = self
+                .receiver
+                .lock()
+                .map_err(|_| io::Error::other("routed UDP receiver lock poisoned"))?;
+            return match receiver.try_recv() {
+                Ok(packet) => Poll::Ready(Ok(packet)),
+                Err(std::sync::mpsc::TryRecvError::Empty) => Poll::Pending,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Poll::Ready(Err(
+                    io::Error::new(io::ErrorKind::UnexpectedEof, "routed UDP socket closed"),
+                )),
+            };
+        }
+    }
+}
+
+#[cfg(feature = "quinn")]
+fn scatter_datagram(payload: &[u8], buffers: &mut [IoSliceMut<'_>]) {
+    let mut offset = 0;
+    for buffer in buffers {
+        if offset >= payload.len() {
+            break;
+        }
+        let copy_len = (payload.len() - offset).min(buffer.len());
+        buffer[..copy_len].copy_from_slice(&payload[offset..offset + copy_len]);
+        offset += copy_len;
+    }
 }
 
 #[derive(Clone)]
@@ -200,7 +353,7 @@ impl UdpServer {
         callback: F,
     ) -> Result<Self, Error>
     where
-        F: Fn(UdpSocket) -> Fut + Clone + Send + Sync + 'static,
+        F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
         Fut: HandlerFuture,
     {
         config.validate()?;
@@ -380,7 +533,7 @@ fn add_socket_callback_reuse_port_listener<F, Fut>(
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
-    F: Fn(UdpSocket) -> Fut + Clone + Send + Sync + 'static,
+    F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
 {
     let sockets = platform::bind_udp_workers(&service_config, runtime.worker_count())?;
@@ -404,7 +557,7 @@ where
             else {
                 return;
             };
-            let _ = callback(socket).await;
+            let _ = callback(socket, worker_id).await;
         })?;
         state.register_task(task)?;
     }
@@ -469,7 +622,7 @@ pub(crate) fn add_socket_callback_simulated_listener<F, Fut, R>(
     route_packet: R,
 ) -> Result<(), Error>
 where
-    F: Fn(UdpSocket) -> Fut + Clone + Send + Sync + 'static,
+    F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
     R: Fn(&[u8], PacketMeta, usize) -> Option<usize> + Clone + Send + Sync + 'static,
 {
@@ -512,7 +665,7 @@ where
             });
             let callback = Arc::clone(&callback);
             let task = runtime.submit_to_worker(worker_id, move || async move {
-                let _ = callback(routed_socket).await;
+                let _ = callback(routed_socket, worker_id).await;
             })?;
             state.register_task(task)?;
         }
@@ -554,11 +707,11 @@ where
 
 pub(crate) fn socket_callback<F, Fut>(callback: F) -> SocketCallback
 where
-    F: Fn(UdpSocket) -> Fut + Clone + Send + Sync + 'static,
+    F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
 {
-    Arc::new(move |socket| {
-        let future = callback.clone()(socket);
+    Arc::new(move |socket, worker_id| {
+        let future = callback.clone()(socket, worker_id);
         Box::pin(future) as HandlerFutureBox
     })
 }
@@ -765,4 +918,76 @@ pub(crate) async fn submit_udp_handler(
     )
     .await
     .map_err(Error::from)
+}
+
+#[cfg(all(test, feature = "quinn", feature = "runtime-tokio"))]
+mod quinn_tests {
+    use super::*;
+    use std::future::poll_fn;
+
+    #[tokio::test]
+    async fn routed_socket_quinn_poll_recv_reads_routed_packet() {
+        let (sender, receiver) = routed_packet_channel();
+        let sender_socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+        let local_addr = sender_socket.local_addr().unwrap();
+        let peer_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let socket = UdpSocket::from_routed(RoutedUdpSocket {
+            sender: sender_socket,
+            receiver,
+            local_addr,
+        });
+
+        send_routed_packet(
+            &sender,
+            RoutedPacket {
+                payload: b"routed-quinn".to_vec(),
+                peer_addr,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut buffer = [0_u8; 32];
+        let (len, source) = poll_fn(|cx| socket.poll_recv_from(cx, &mut buffer))
+            .await
+            .unwrap();
+
+        assert_eq!(&buffer[..len], b"routed-quinn");
+        assert_eq!(source, peer_addr);
+    }
+
+    #[tokio::test]
+    async fn routed_socket_quinn_poll_recv_vectored_scatters_datagram() {
+        let (sender, receiver) = routed_packet_channel();
+        let sender_socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+        let local_addr = sender_socket.local_addr().unwrap();
+        let peer_addr: SocketAddr = "127.0.0.1:12346".parse().unwrap();
+        let socket = UdpSocket::from_routed(RoutedUdpSocket {
+            sender: sender_socket,
+            receiver,
+            local_addr,
+        });
+
+        send_routed_packet(
+            &sender,
+            RoutedPacket {
+                payload: b"abcdef".to_vec(),
+                peer_addr,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut first = [0_u8; 2];
+        let mut second = [0_u8; 4];
+        let mut buffers = [IoSliceMut::new(&mut first), IoSliceMut::new(&mut second)];
+        let (len, source) = poll_fn(|cx| socket.poll_recv_from_vectored(cx, &mut buffers))
+            .await
+            .unwrap();
+
+        assert_eq!(len, 6);
+        assert_eq!(source, peer_addr);
+        assert_eq!(&first, b"ab");
+        assert_eq!(&second, b"cdef");
+    }
 }

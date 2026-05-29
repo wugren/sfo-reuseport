@@ -1,6 +1,6 @@
 use std::io;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::core::{Error, ServiceConfig, TransparentMode};
 
@@ -56,6 +56,10 @@ pub(crate) fn bind_quic_udp_reuseport_workers(
     config: &ServiceConfig,
     workers: usize,
 ) -> Result<Option<Vec<UdpSocket>>, Error> {
+    if std::env::var_os("SFO_REUSEPORT_DISABLE_QUIC_BPF").is_some() {
+        return Ok(None);
+    }
+
     if workers == 0 {
         return Err(Error::InvalidConfig(
             "worker count must be greater than zero".to_string(),
@@ -111,42 +115,92 @@ fn quic_reuseport_selector_routes_probe(
     sockets: &[UdpSocket],
     bind_addr: SocketAddr,
 ) -> io::Result<()> {
-    const PROBE_PACKET: [u8; 10] = [0xc0, 0, 0, 0, 1, 4, 0, 0, 0, 0];
-
     let target = routable_probe_addr(bind_addr);
     let sender = UdpSocket::bind(match target {
         SocketAddr::V4(_) => "127.0.0.1:0",
         SocketAddr::V6(_) => "[::1]:0",
     })?;
-    sender.send_to(&PROBE_PACKET, target)?;
-
-    for socket in sockets {
-        socket.set_read_timeout(Some(Duration::from_millis(10)))?;
-    }
-
-    let mut buffer = [0_u8; 16];
-    let result = match sockets.first() {
-        Some(socket) => socket.recv_from(&mut buffer).and_then(|(len, _)| {
-            if buffer[..len] == PROBE_PACKET {
-                Ok(())
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "QUIC reuse-port selector probe received unexpected packet",
-                ))
-            }
-        }),
-        None => Err(io::Error::new(
+    if sockets.is_empty() || sockets.len() > u16::MAX as usize + 1 {
+        return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "worker count must be greater than zero",
-        )),
-    };
-
-    for socket in sockets {
-        let _ = socket.set_read_timeout(None);
+            "worker count must fit the QUIC CID worker index prefix",
+        ));
     }
 
-    result
+    for socket in sockets {
+        socket.set_nonblocking(true)?;
+    }
+
+    for expected_socket in 0..sockets.len() {
+        let probe_packet = quic_reuseport_probe_packet(expected_socket);
+        sender.send_to(&probe_packet, target)?;
+        quic_reuseport_selector_wait_for_probe(sockets, expected_socket, &probe_packet)?;
+    }
+
+    quic_reuseport_selector_drain_probe_packets(sockets)?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn quic_reuseport_selector_wait_for_probe(
+    sockets: &[UdpSocket],
+    expected_socket: usize,
+    probe_packet: &[u8],
+) -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let mut buffer = [0_u8; 16];
+    while Instant::now() < deadline {
+        for (index, socket) in sockets.iter().enumerate() {
+            match socket.recv_from(&mut buffer) {
+                Ok((len, _)) if buffer[..len] == probe_packet[..] && index == expected_socket => {
+                    return Ok(());
+                }
+                Ok((len, _)) if buffer[..len] == probe_packet[..] => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "QUIC reuse-port selector probe routed to unexpected worker",
+                    ));
+                }
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "QUIC reuse-port selector probe received unexpected packet",
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "QUIC reuse-port selector probe timed out",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn quic_reuseport_probe_packet(expected_socket: usize) -> Vec<u8> {
+    let worker_index = expected_socket as u16;
+    let [high, low] = worker_index.to_be_bytes();
+    vec![0xe0, 0, 0, 0, 1, 4, high, low, 0xa5, low]
+}
+
+#[cfg(target_os = "linux")]
+fn quic_reuseport_selector_drain_probe_packets(sockets: &[UdpSocket]) -> io::Result<()> {
+    let mut buffer = [0_u8; 16];
+    for socket in sockets {
+        loop {
+            match socket.recv_from(&mut buffer) {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -477,7 +531,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quic_reuseport_cbpf_reads_long_and_short_header_shards() {
+    fn quic_reuseport_cbpf_instruction_shape_is_covered() {
         let filter = quic_reuseport_cbpf(4);
 
         assert_eq!(filter[0], sock_filter(0x00 | 0x10 | 0x20, 0, 0, 0));
@@ -489,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn quic_reuseport_ebpf_reads_long_and_short_header_shards() {
+    fn quic_reuseport_ebpf_instruction_shape_is_covered() {
         let program = quic_reuseport_ebpf(4);
 
         assert_eq!(program[0], bpf_insn(0x07 | 0xb0 | 0x08, 6, 1, 0, 0));
@@ -499,5 +553,15 @@ mod tests {
         assert_eq!(program[26], bpf_insn(0x01 | 0x10 | 0x60, 0, 2, 1, 0));
         assert_eq!(program[30], bpf_insn(0x07 | 0x90 | 0x00, 0, 0, 0, 4));
         assert_eq!(program[33], bpf_insn(0x05 | 0x90, 0, 0, 0, 0));
+    }
+
+    #[test]
+    fn quic_reuseport_probe_uses_fixed_two_byte_selector() {
+        let expected_socket = 3;
+        let packet = quic_reuseport_probe_packet(expected_socket);
+
+        assert_eq!(packet[0], 0xe0);
+        assert_eq!(packet[5], 4);
+        assert_eq!(u16::from_be_bytes([packet[6], packet[7]]) as usize % 4, expected_socket);
     }
 }

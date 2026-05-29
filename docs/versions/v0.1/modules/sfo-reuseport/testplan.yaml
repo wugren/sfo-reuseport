@@ -51,15 +51,19 @@ levels:
         change_ids: ["CHG-worker-thread-runtime", "CHG-worker-model", "CHG-server-runtime"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: callback-signature-no-worker-id
-        name: TCP 和 UDP 回调签名不暴露 worker id
-        change_ids: ["CHG-worker-model", "CHG-tcp-serve", "CHG-udp-runtime-socket"]
+        name: TCP UDP QUIC 常规回调不暴露 worker id
+        change_ids: ["CHG-worker-model", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: udp-runtime-socket-api
         name: UDP handler 和 server listener 统一 UdpSocket API 契约
         change_ids: ["CHG-udp-runtime-socket", "CHG-dynamic-listeners", "CHG-quic-routed-udp"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: quinn-udp-socket-compat
+        name: quinn feature-gated UdpSocket adapter helper API
+        change_ids: ["CHG-quinn-udp-socket-compat", "CHG-udp-runtime-socket", "CHG-udp-quic-listener-serve"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: udp-quic-socket-only-api
-        name: UdpServer QuicServer socket-only serve API 契约
+        name: UdpServer QuicServer socket-only serve 回调交付 UdpSocket 和 worker id
         change_ids: ["CHG-udp-quic-listener-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: linux-compatible-scheduling
@@ -79,8 +83,12 @@ levels:
         change_ids: ["CHG-server-runtime", "CHG-dynamic-listeners", "CHG-mixed-protocol-workers"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: quic-route-key-parsing
-        name: QUIC routed UDP 路由键解析和非法 packet 边界
+        name: QUIC routed UDP 握手 fallback、路由键解析和非法 packet 边界
         change_ids: ["CHG-quic-routed-udp"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: quic-cid-generator
+        name: QUIC CID generator layout、长度和 worker 边界
+        change_ids: ["CHG-quic-cid-generator", "CHG-quic-routed-udp"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: quic-reuseport-bpf-unit
         name: Linux QUIC reuse-port eBPF selector 指令和 fallback 单元覆盖
@@ -113,6 +121,10 @@ levels:
       - id: runtime-tokio-uring-feature
         name: tokio-uring runtime feature Linux all-targets 编译
         change_ids: ["CHG-tokio-uring-runtime", "CHG-runtime-features"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
+      - id: quinn-feature-check
+        name: quinn feature 默认 runtime 和可选 runtime 编译
+        change_ids: ["CHG-quinn-udp-socket-compat", "CHG-runtime-features", "CHG-tokio-uring-runtime"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
       - id: platform-current-target
         name: 当前目标平台 cfg 和 socket backend 编译
@@ -169,8 +181,12 @@ levels:
         change_ids: ["CHG-udp-runtime-socket", "CHG-worker-model", "CHG-worker-thread-runtime", "CHG-runtime-features"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: udp-quic-socket-only-serve
-        name: UDP/QUIC socket-only serve 回调交付统一 UdpSocket 并由应用自行 recv
+        name: UDP/QUIC socket-only serve 回调交付统一 UdpSocket 和 worker id 并由应用自行 recv
         change_ids: ["CHG-udp-quic-listener-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: quinn-helper-loopback
+        name: quinn UdpSocket helper native loopback 收发
+        change_ids: ["CHG-quinn-udp-socket-compat", "CHG-udp-runtime-socket", "CHG-udp-quic-listener-serve"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: dynamic-listeners
         name: TCP/UDP/QUIC serve 注册、server 对象关闭和 listener 动态管理 API 不公开
@@ -185,11 +201,11 @@ levels:
         change_ids: ["CHG-server-runtime", "CHG-mixed-protocol-workers", "CHG-dynamic-listeners", "CHG-worker-model", "CHG-worker-thread-runtime"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: quic-routed-udp
-        name: QUIC routed UDP worker shard 稳定投递
+        name: QUIC routed UDP 握手 fallback 和 worker index 前缀稳定投递
         change_ids: ["CHG-quic-routed-udp", "CHG-udp-runtime-socket", "CHG-worker-model", "CHG-worker-thread-runtime"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: quic-routed-udp-bpf-fallback
-        name: QUIC routed UDP Linux eBPF/CBPF selector 或用户态 fallback 稳定投递
+        name: QUIC routed UDP Linux eBPF/CBPF selector 一致性探测或用户态 fallback 稳定投递
         change_ids: ["CHG-quic-routed-udp", "CHG-platform-behavior", "CHG-udp-runtime-socket", "CHG-worker-model", "CHG-worker-thread-runtime"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: platform-os-matrix

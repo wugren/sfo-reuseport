@@ -32,16 +32,16 @@ async fn run() -> Result<(), Error> {
         args.addr, args.workers
     );
 
-    let _server = UdpServer::serve_socket(&runtime, config, |socket| async move {
-        serve_socket_echo(socket).await
+    let _server = UdpServer::serve_socket(&runtime, config, |socket, worker_id| async move {
+        serve_socket_echo(socket, worker_id).await
     })?;
 
     std::future::pending::<Result<(), Error>>().await
 }
 
-async fn serve_socket_echo(socket: UdpSocket) -> Result<(), Error> {
+async fn serve_socket_echo(socket: UdpSocket, worker_id: usize) -> Result<(), Error> {
     let local_addr = socket.local_addr()?;
-    eprintln!("worker received UDP socket for {local_addr}");
+    eprintln!("worker {worker_id} received UDP socket for {local_addr}");
 
     let mut buffer = vec![0_u8; 2048];
     loop {

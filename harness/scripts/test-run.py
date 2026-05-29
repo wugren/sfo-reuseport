@@ -35,7 +35,9 @@ COMMANDS = {
     "sfo-reuseport": {
         "unit": [
             ["cargo", "test", "--lib"],
+            ["cargo", "test", "--lib", "--features", "quinn"],
             ["cargo", "test", "--test", "unit"],
+            ["cargo", "test", "--test", "unit", "--features", "quinn"],
         ],
         "dv": [
             ["cargo", "check"],
@@ -52,6 +54,9 @@ COMMANDS = {
             cargo_check_example("hyper_static", "runtime-async-std"),
             cargo_check_example("hyper_static", "runtime-tokio-uring"),
             ["cargo", "check", "--no-default-features", "--features", "runtime-async-std", "--lib"],
+            ["cargo", "check", "--features", "quinn"],
+            ["cargo", "check", "--no-default-features", "--features", "runtime-async-std,quinn", "--lib"],
+            ["cargo", "check", "--no-default-features", "--features", "runtime-tokio-uring,quinn", "--lib"],
             TOKIO_URING_CHECK,
             ["cargo", "test", "--test", "dv"],
             ["python3", "./harness/scripts/test-hyper-static-example.py", "--runtime", "runtime-tokio"],
@@ -64,7 +69,10 @@ COMMANDS = {
             ["python3", "./harness/scripts/test-udp-serve-socket-example.py", "--runtime", "runtime-async-std"],
             ["python3", "./harness/scripts/test-udp-serve-socket-example.py", "--runtime", "runtime-tokio-uring"],
         ],
-        "integration": [["cargo", "test", "--test", "integration"]],
+        "integration": [
+            ["cargo", "test", "--test", "integration", "--", "--test-threads=1"],
+            ["cargo", "test", "--test", "integration", "--features", "quinn", "--", "--test-threads=1"],
+        ],
     }
 }
 
@@ -84,7 +92,7 @@ def main() -> int:
         for level in levels:
             commands = COMMANDS[module][level]
             for command in commands:
-                if "runtime-tokio-uring" in command and platform.system() != "Linux":
+                if any("runtime-tokio-uring" in part for part in command) and platform.system() != "Linux":
                     print(
                         f"test-run: {module} {level}: skip {' '.join(command)} "
                         "(runtime-tokio-uring is Linux-only)"

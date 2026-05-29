@@ -1,4 +1,6 @@
 use std::net::UdpSocket as StdUdpSocket;
+#[cfg(feature = "quinn")]
+use std::future::poll_fn;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -41,15 +43,16 @@ async fn udp_server_serve_socket_returns_socket_for_application_recv() {
     let addr = free_addr();
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
     let (socket_tx, socket_rx) = mpsc::channel();
-    let server = UdpServer::serve_socket(&runtime, ServiceConfig::new(addr), move |socket| {
+    let server = UdpServer::serve_socket(&runtime, ServiceConfig::new(addr), move |socket, worker_id| {
         let socket_tx = socket_tx.clone();
         async move {
-            socket_tx.send(socket).unwrap();
+            socket_tx.send((socket, worker_id)).unwrap();
             Ok(())
         }
     })
     .unwrap();
-    let socket = socket_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let (socket, worker_id) = socket_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(worker_id, 0);
     let local_addr = socket.local_addr().unwrap();
 
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -71,19 +74,20 @@ async fn quic_server_serve_socket_delivers_quic_routable_packet_to_application_s
     let addr = free_addr();
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
     let (socket_tx, socket_rx) = mpsc::channel();
-    let server = QuicServer::serve_socket(&runtime, ServiceConfig::new(addr), move |socket| {
+    let server = QuicServer::serve_socket(&runtime, ServiceConfig::new(addr), move |socket, worker_id| {
         let socket_tx = socket_tx.clone();
         async move {
-            socket_tx.send(socket).unwrap();
+            socket_tx.send((socket, worker_id)).unwrap();
             Ok(())
         }
     })
     .unwrap();
-    let socket = socket_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let (socket, worker_id) = socket_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(worker_id, 0);
     let local_addr = socket.local_addr().unwrap();
 
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let packet = [0xc0, 0, 0, 0, 1, 4, 0, 0, b'p', b'i', b'n', b'g'];
+    let packet = [0xe0, 0, 0, 0, 1, 4, 0, 0, b'p', b'i', b'n', b'g'];
     client.send_to(&packet, local_addr).await.unwrap();
 
     let mut buffer = [0_u8; 32];
@@ -94,5 +98,54 @@ async fn quic_server_serve_socket_delivers_quic_routable_packet_to_application_s
 
     assert_eq!(&buffer[..len], &packet);
     assert_eq!(peer_addr, client.local_addr().unwrap());
+    server.close().unwrap();
+}
+
+#[cfg(feature = "quinn")]
+#[tokio::test]
+async fn udp_server_serve_socket_quinn_helpers_recv_and_send_on_native_socket() {
+    let addr = free_addr();
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let (socket_tx, socket_rx) = mpsc::channel();
+    let server = UdpServer::serve_socket(&runtime, ServiceConfig::new(addr), move |socket, worker_id| {
+        let socket_tx = socket_tx.clone();
+        async move {
+            socket_tx.send((socket, worker_id)).unwrap();
+            Ok(())
+        }
+    })
+    .unwrap();
+    let (socket, worker_id) = socket_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(worker_id, 0);
+    let local_addr = socket.local_addr().unwrap();
+
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.send_to(b"quinn-helper", local_addr).await.unwrap();
+
+    let mut buffer = [0_u8; 32];
+    let (len, peer_addr) = tokio::time::timeout(
+        Duration::from_secs(2),
+        poll_fn(|cx| socket.poll_recv_from(cx, &mut buffer)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(&buffer[..len], b"quinn-helper");
+    assert_eq!(peer_addr, client.local_addr().unwrap());
+
+    tokio::time::timeout(Duration::from_secs(2), poll_fn(|cx| socket.poll_send_ready(cx)))
+        .await
+        .unwrap()
+        .unwrap();
+    socket.try_send_to(b"quinn-reply", peer_addr).unwrap();
+
+    let mut reply = [0_u8; 32];
+    let (len, source) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply[..len], b"quinn-reply");
+    assert_eq!(source, local_addr);
     server.close().unwrap();
 }

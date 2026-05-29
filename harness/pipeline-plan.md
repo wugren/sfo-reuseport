@@ -7,7 +7,7 @@
 - Auto-confirm completed document stages: yes
 - Version: v0.1
 - Module(s): sfo-reuseport
-- change_id values: CHG-server-runtime, CHG-tcp-serve, CHG-udp-runtime-socket, CHG-quic-routed-udp, CHG-tokio-uring-runtime, CHG-publish-metadata
+- change_id values: CHG-server-runtime, CHG-tcp-serve, CHG-udp-runtime-socket, CHG-quic-routed-udp, CHG-tokio-uring-runtime, CHG-publish-metadata, CHG-quinn-udp-socket-compat, CHG-udp-quic-listener-serve, CHG-worker-model
 
 ## Acceptance Baseline
 - Final acceptance is judged against:
@@ -91,6 +91,21 @@
 | I-16 | implementation | complete | add package metadata and include boundary | `Cargo.toml` | root | D-16, admission-check passed | manifest metadata | implementation complete; `cargo metadata` passed |
 | T-16 | testing | confirmed | verify package metadata and package file list | cargo metadata/package list evidence | root | I-16 | command evidence | `cargo metadata --no-deps --format-version 1` and `cargo package --list --allow-dirty` passed |
 | A-16 | acceptance | complete | audit publish metadata evidence chain | publish metadata final | root | T-16 | `docs/versions/v0.1/reviews/sfo-reuseport-v0.1-publish-metadata-acceptance.md` | accepted; no manifest or package-list mismatch found; uv unavailable and stage-scope blocked by aggregate working-tree baseline |
+| P-17 | proposal | confirmed | add default-off quinn UDP socket adapter interface requirement | `UdpSocket` quinn adapter support | root | user confirmed requirement | `proposal.md` | proposal updated and user-approved; schema-check passed; stage-scope passed via python3 fallback because uv unavailable |
+| D-17 | design | confirmed | define quinn feature gate and `UdpSocket` poll/readiness interface semantics | `UdpSocket` feature-gated adapter API | root | P-17 | `design.md` | design updated and auto-confirmed; schema-check passed; stage-scope blocked by aggregate proposal/pipeline-plan diff |
+| I-17 | implementation | complete | implement default-off quinn feature and UDP adapter methods | `Cargo.toml`, runtime/core UDP code | root | D-17, admission-check passed | production code | implementation complete; default, quinn, async-std+quinn, and tokio-uring+quinn cargo checks pass |
+| T-17 | testing | confirmed | verify quinn feature-gated API and routed/native behavior | API tests and runtime tests | root | I-17 | tests and testing docs | testing updated and auto-confirmed; unit, dv, and integration passed through python3 harness; stage-scope blocked by aggregate pipeline diff |
+| A-17 | acceptance | complete | audit quinn UDP socket compatibility evidence chain | quinn adapter final | root | T-17 | `docs/versions/v0.1/reviews/sfo-reuseport-v0.1-quinn-udp-socket-compat-acceptance.md` | accepted; no blocking findings; root shortcut blocked by missing uv; stage-scope blocked by aggregate working-tree diff |
+| P-18 | proposal | confirmed | require socket-only serve callbacks to receive socket worker id | `UdpServer::serve_socket` and `QuicServer::serve_socket` callback contract | root | user auto-pipeline continuation | `proposal.md` | proposal updated and auto-confirmed; schema-check passed; stage-scope blocked by aggregate working-tree baseline |
+| D-18 | design | confirmed | synchronize socket-only serve API design to pass worker id | callback signatures, fallback/native callback delivery, API boundaries | root | P-18 | `design.md` | design updated and auto-confirmed; schema-check and admission-check passed; stage-scope blocked by aggregate working-tree baseline |
+| I-18 | implementation | complete | pass socket owner worker id to socket-only callbacks | `src/core/udp.rs`, `src/core/quic.rs`, callers/examples as needed | root | D-18, admission-check passed | production code | implementation complete; `cargo check` passed |
+| T-18 | testing | confirmed | verify socket-only callbacks receive worker id | API signature tests, UDP/QUIC integration tests, testing docs | root | I-18 | tests and testing docs | `sfo-reuseport all` and `all all` passed via python3 harness; stage-scope blocked by aggregate working-tree baseline |
+| A-18 | acceptance | complete | audit socket-only worker id evidence chain | socket-only callback worker id final | root | T-18 | `docs/versions/v0.1/reviews/sfo-reuseport-v0.1-serve-socket-worker-id-acceptance.md` | accepted by behavior; strict process caveats are aggregate stage-scope baseline and missing uv for root shortcut |
+| P-19 | proposal | confirmed | keep QUIC CID worker index as fixed 2-byte worker shard | QuicServer CID routing and QuicCidGenerator contract | root | user restored fixed 2-byte requirement | `proposal.md` | proposal updated; downstream auto-pipeline authorized |
+| D-19 | design | confirmed | synchronize QuicServer and QuicCidGenerator design to fixed 2-byte worker index prefix | CID layout, route parsing, public generator API, BPF/user-space consistency | root | P-19 | `design.md` | design updated and auto-confirmed; schema-check passed; stage-scope blocked by aggregate working-tree baseline |
+| I-19 | implementation | complete | implement fixed 2-byte CID worker index prefix in generator and routing | `src/core/cid.rs`, `src/core/quic.rs`, Linux selector if present | root | D-19, admission-check passed | production code | implementation complete; `cargo check` passed |
+| T-19 | testing | confirmed | verify fixed 2-byte CID prefix generation and routing | unit/API/integration tests and testing docs | root | I-19 | tests and testing docs | `sfo-reuseport all` passed; full Quinn endpoint interop marked ignored/manual under canonical `--test-threads=1` |
+| A-19 | acceptance | complete | audit fixed 2-byte QUIC CID prefix evidence chain | CID routing final | root | T-19 | `docs/versions/v0.1/reviews/sfo-reuseport-v0.1-quic-cid-prefix-acceptance.md` | accepted by behavior; strict process caveats are aggregate stage-scope baseline and missing uv |
 
 ## Submodule Tasks
 | Task ID | Stage | Status | Responsibility | Submodule | Parent Task | Depends On | Output | Done Condition |

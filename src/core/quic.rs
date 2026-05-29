@@ -5,7 +5,7 @@ use crate::core::udp::{
     PacketMeta, UdpHandler, UdpServerState, UdpSocket, add_socket_callback_simulated_listener,
     is_active, socket_callback, submit_udp_handler, udp_handler,
 };
-use crate::core::{Error, HandlerFuture, ServerRuntime, ServiceConfig};
+use crate::core::{Error, HandlerFuture, ServerRuntime, ServiceConfig, stable_hash_bytes};
 use crate::platform;
 use crate::runtime;
 
@@ -47,7 +47,7 @@ impl QuicServer {
         callback: F,
     ) -> Result<Self, Error>
     where
-        F: Fn(UdpSocket) -> Fut + Clone + Send + Sync + 'static,
+        F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
         Fut: HandlerFuture,
     {
         config.validate()?;
@@ -66,7 +66,7 @@ fn add_quic_socket_callback_listener<F, Fut>(
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
-    F: Fn(UdpSocket) -> Fut + Clone + Send + Sync + 'static,
+    F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
 {
     if platform::supports_reuse_port_balancing() {
@@ -96,7 +96,7 @@ fn add_quic_socket_callback_reuseport_bpf_listener<F, Fut>(
     state: Arc<UdpServerState>,
 ) -> Result<bool, Error>
 where
-    F: Fn(UdpSocket) -> Fut + Clone + Send + Sync + 'static,
+    F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
 {
     let Some(sockets) =
@@ -124,7 +124,7 @@ where
             else {
                 return;
             };
-            let _ = callback(socket).await;
+            let _ = callback(socket, worker_id).await;
         })?;
         state.register_task(task)?;
     }
@@ -361,13 +361,17 @@ fn quic_worker_index(packet: &[u8], workers: usize) -> Option<usize> {
         return None;
     }
 
-    let shard = if packet[0] & 0x80 != 0 {
-        quic_worker_shard(quic_long_header_dcid(packet)?)?
+    if packet[0] & 0x80 != 0 {
+        let dcid = quic_long_header_dcid(packet)?;
+        if quic_long_header_uses_dcid_hash_fallback(packet[0]) {
+            return quic_dcid_hash_worker(dcid, workers);
+        }
+        let worker_index = quic_worker_index_prefix(dcid)?;
+        Some(worker_index % workers)
     } else {
-        quic_worker_shard(packet.get(1..)?)?
-    };
-
-    Some(usize::from(shard) % workers)
+        let worker_index = quic_worker_index_prefix(packet.get(1..)?)?;
+        Some(worker_index % workers)
+    }
 }
 
 fn quic_reuseport_bpf_accepts_packet(packet: &[u8], workers: usize) -> bool {
@@ -387,9 +391,21 @@ fn quic_long_header_dcid(packet: &[u8]) -> Option<&[u8]> {
     Some(&packet[start..end])
 }
 
-fn quic_worker_shard(bytes: &[u8]) -> Option<u16> {
-    let shard = bytes.get(..2)?;
-    Some(u16::from_be_bytes([shard[0], shard[1]]))
+fn quic_long_header_uses_dcid_hash_fallback(first_byte: u8) -> bool {
+    matches!(first_byte & 0x30, 0x00 | 0x10)
+}
+
+fn quic_dcid_hash_worker(dcid: &[u8], workers: usize) -> Option<usize> {
+    if dcid.len() < 8 {
+        return None;
+    }
+    Some((stable_hash_bytes(dcid) as usize) % workers)
+}
+
+fn quic_worker_index_prefix(bytes: &[u8]) -> Option<usize> {
+    let first = *bytes.first()?;
+    let second = *bytes.get(1)?;
+    Some((usize::from(first) << 8) | usize::from(second))
 }
 
 #[cfg(test)]
@@ -397,13 +413,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quic_long_header_uses_first_two_dcid_bytes_as_worker_shard() {
-        let packet = [0xc0, 0, 0, 0, 1, 4, 0x01, 0x02, 9, 9];
+    fn quic_long_header_uses_two_byte_worker_index_prefix() {
+        let packet = [0xe0, 0, 0, 0, 1, 4, 0, 2, 9, 9];
         assert_eq!(quic_worker_index(&packet, 4), Some(2));
     }
 
     #[test]
-    fn quic_short_header_uses_first_two_bytes_after_header_as_worker_shard() {
+    fn quic_long_header_uses_full_16_bit_worker_index_prefix() {
+        let packet = [0xe0, 0, 0, 0, 1, 4, 0x01, 0x03, 9, 9];
+        assert_eq!(quic_worker_index(&packet, 4), Some(3));
+    }
+
+    #[test]
+    fn quic_initial_uses_full_dcid_hash_fallback() {
+        let dcid = [8, 7, 6, 5, 4, 3, 2, 1];
+        let packet = [0xc0, 0, 0, 0, 1, 8, 8, 7, 6, 5, 4, 3, 2, 1];
+        let expected = (stable_hash_bytes(&dcid) as usize) % 4;
+
+        assert_eq!(quic_worker_index(&packet, 4), Some(expected));
+    }
+
+    #[test]
+    fn quic_zero_rtt_uses_full_dcid_hash_fallback() {
+        let dcid = [1, 3, 5, 7, 9, 11, 13, 15];
+        let packet = [0xd0, 0, 0, 0, 1, 8, 1, 3, 5, 7, 9, 11, 13, 15];
+        let expected = (stable_hash_bytes(&dcid) as usize) % 4;
+
+        assert_eq!(quic_worker_index(&packet, 4), Some(expected));
+    }
+
+    #[test]
+    fn quic_short_header_uses_two_byte_worker_index_prefix() {
+        let packet = [0x40, 0, 3, 2, 3];
+        assert_eq!(quic_worker_index(&packet, 4), Some(3));
+    }
+
+    #[test]
+    fn quic_short_header_uses_full_16_bit_worker_index_prefix() {
         let packet = [0x40, 0x01, 0x03, 2, 3];
         assert_eq!(quic_worker_index(&packet, 4), Some(3));
     }
@@ -414,12 +460,14 @@ mod tests {
         assert_eq!(quic_worker_index(&[0xc0, 0, 0, 0, 1, 0], 4), None);
         assert_eq!(quic_worker_index(&[0xc0, 0, 0, 0, 1, 1, 1], 4), None);
         assert_eq!(quic_worker_index(&[0xc0, 0, 0, 0, 1, 4, 1], 4), None);
-        assert_eq!(quic_worker_index(&[0x40, 1], 4), None);
+        assert_eq!(quic_worker_index(&[0xc0, 0, 0, 0, 1, 7, 1, 2, 3, 4, 5, 6, 7], 4), None);
+        assert_eq!(quic_worker_index(&[0x40], 4), None);
+        assert_eq!(quic_worker_index(&[0x40, 0x80], 4), None);
     }
 
     #[test]
     fn quic_reuseport_bpf_path_trusts_kernel_worker_selection() {
-        let packet = [0xc0, 0, 0, 0, 1, 4, 0, 2, 9, 9];
+        let packet = [0xe0, 0, 0, 0, 1, 4, 0, 2, 9, 9];
 
         assert_eq!(quic_worker_index(&packet, 4), Some(2));
         assert!(quic_reuseport_bpf_accepts_packet(&packet, 4));

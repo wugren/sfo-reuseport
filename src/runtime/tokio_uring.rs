@@ -4,6 +4,8 @@ compile_error!("runtime-tokio-uring is only supported on Linux targets");
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
+#[cfg(feature = "quinn")]
+use std::io::IoSliceMut;
 use std::net::{
     SocketAddr, TcpListener as StdTcpListener, TcpStream as StdTcpStream,
     UdpSocket as StdUdpSocket,
@@ -324,4 +326,51 @@ pub async fn udp_send_to(
     let send_buffer = buffer.to_vec();
     let (result, _send_buffer) = socket.send_to(send_buffer, target).await;
     result
+}
+
+#[cfg(feature = "quinn")]
+pub fn udp_try_send_to(
+    _socket: &UdpSocket,
+    _buffer: &[u8],
+    _target: SocketAddr,
+) -> io::Result<usize> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "quinn UDP adapter helpers require readiness-based runtime socket I/O",
+    ))
+}
+
+#[cfg(feature = "quinn")]
+pub fn udp_poll_send_ready(
+    _socket: &UdpSocket,
+    _cx: &mut std::task::Context<'_>,
+) -> std::task::Poll<io::Result<()>> {
+    std::task::Poll::Ready(Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "quinn UDP adapter helpers require readiness-based runtime socket I/O",
+    )))
+}
+
+#[cfg(feature = "quinn")]
+pub fn udp_poll_recv_from_slice(
+    _socket: &UdpSocket,
+    _cx: &mut std::task::Context<'_>,
+    _buffer: &mut [u8],
+) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
+    std::task::Poll::Ready(Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "quinn UDP adapter helpers require readiness-based runtime socket I/O",
+    )))
+}
+
+#[cfg(feature = "quinn")]
+pub fn udp_poll_recv_from_vectored(
+    _socket: &UdpSocket,
+    _cx: &mut std::task::Context<'_>,
+    _buffers: &mut [IoSliceMut<'_>],
+) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
+    std::task::Poll::Ready(Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "quinn UDP adapter helpers require readiness-based runtime socket I/O",
+    )))
 }

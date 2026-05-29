@@ -3,8 +3,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use sfo_reuseport::{
-    Error, PacketMeta, QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer,
-    TcpStream, UdpServer, UdpSocket,
+    Error, PacketMeta, QuicCidGenerator, QuicServer, ServerRuntime, ServerRuntimeConfig,
+    ServiceConfig, TcpServer, TcpStream, UdpServer, UdpSocket,
 };
 
 fn assert_tcp_handler<F, Fut>(_handler: F)
@@ -21,10 +21,22 @@ where
 {
 }
 
+fn assert_socket_callback<F, Fut>(_callback: F)
+where
+    F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), Error>> + Send + 'static,
+{
+}
+
 #[test]
-fn callback_signatures_do_not_include_worker_id() {
+fn regular_callback_signatures_do_not_include_worker_id() {
     assert_tcp_handler(|_stream| async { Ok(()) });
     assert_udp_handler(|_socket, _meta, _payload| async { Ok(()) });
+}
+
+#[test]
+fn socket_only_callback_signatures_include_worker_id() {
+    assert_socket_callback(|_socket, _worker_id| async { Ok(()) });
 }
 
 #[test]
@@ -45,10 +57,10 @@ fn server_entrypoints_are_public() {
     let udp_socket: Result<UdpServer, Error> = UdpServer::serve_socket(
         &runtime,
         ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
-        move |socket| {
+        move |socket, worker_id| {
             let udp_tx = udp_tx.clone();
             async move {
-                udp_tx.send(socket.local_addr()?).unwrap();
+                udp_tx.send((socket.local_addr()?, worker_id)).unwrap();
                 Ok(())
             }
         },
@@ -56,10 +68,10 @@ fn server_entrypoints_are_public() {
     let quic_socket: Result<QuicServer, Error> = QuicServer::serve_socket(
         &runtime,
         ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
-        move |socket| {
+        move |socket, worker_id| {
             let quic_tx = quic_tx.clone();
             async move {
-                quic_tx.send(socket.local_addr()?).unwrap();
+                quic_tx.send((socket.local_addr()?, worker_id)).unwrap();
                 Ok(())
             }
         },
@@ -70,8 +82,8 @@ fn server_entrypoints_are_public() {
     quic.unwrap().close().unwrap();
     let udp_socket = udp_socket.unwrap();
     let quic_socket = quic_socket.unwrap();
-    assert!(udp_rx.recv_timeout(Duration::from_secs(2)).is_ok());
-    assert!(quic_rx.recv_timeout(Duration::from_secs(2)).is_ok());
+    assert_eq!(udp_rx.recv_timeout(Duration::from_secs(2)).unwrap().1, 0);
+    assert_eq!(quic_rx.recv_timeout(Duration::from_secs(2)).unwrap().1, 0);
     udp_socket.close().unwrap();
     quic_socket.close().unwrap();
 }
@@ -140,4 +152,53 @@ fn dispatch_policy_is_not_public() {
     assert!(!lib.contains("DispatchPolicy"));
     assert!(!core.contains("DispatchPolicy"));
     assert!(!config.contains("with_dispatch"));
+}
+
+#[test]
+fn quinn_feature_is_default_off_and_has_no_dependency() {
+    let cargo = include_str!("../../Cargo.toml");
+
+    assert!(cargo.contains("quinn = []"));
+    assert!(!cargo.contains("default = [\"runtime-tokio\", \"quinn\"]"));
+    assert!(!cargo.contains("dep:quinn"));
+    assert!(!cargo.contains("dep:quinn-udp"));
+}
+
+#[test]
+fn quic_cid_generator_is_public_without_quinn_types() {
+    let generator = QuicCidGenerator::new(3).unwrap();
+
+    assert_eq!(generator.worker_index(), 3);
+    assert_eq!(generator.cid_len(), QuicCidGenerator::DEFAULT_CID_LEN);
+}
+
+#[test]
+fn quinn_udp_socket_helpers_are_feature_gated() {
+    let udp = include_str!("../../src/core/udp.rs");
+
+    assert!(udp.contains("#[cfg(feature = \"quinn\")]\n    pub fn try_send_to"));
+    assert!(udp.contains("#[cfg(feature = \"quinn\")]\n    pub fn poll_send_ready"));
+    assert!(udp.contains("#[cfg(feature = \"quinn\")]\n    pub fn poll_recv_from"));
+    assert!(udp.contains("#[cfg(feature = \"quinn\")]\n    pub fn poll_recv_from_vectored"));
+}
+
+#[cfg(feature = "quinn")]
+#[test]
+fn quinn_udp_socket_helpers_are_public_when_feature_enabled() {
+    use std::future::poll_fn;
+    use std::io::{self, IoSliceMut};
+    use std::net::SocketAddr;
+
+    fn assert_quinn_helpers(socket: &UdpSocket, target: SocketAddr) {
+        let mut buffer = [0_u8; 8];
+        let mut vectored_buffer = [0_u8; 8];
+        let mut buffers = [IoSliceMut::new(&mut vectored_buffer)];
+
+        let _: io::Result<usize> = socket.try_send_to(b"ping", target);
+        let _ = poll_fn(|cx| socket.poll_send_ready(cx));
+        let _ = poll_fn(|cx| socket.poll_recv_from(cx, &mut buffer));
+        let _ = poll_fn(|cx| socket.poll_recv_from_vectored(cx, &mut buffers));
+    }
+
+    let _ = assert_quinn_helpers as fn(&UdpSocket, SocketAddr);
 }
