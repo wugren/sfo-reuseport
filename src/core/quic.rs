@@ -3,9 +3,9 @@ use std::sync::atomic::AtomicBool;
 
 use crate::core::udp::{
     PacketMeta, UdpHandler, UdpServerState, UdpSocket, add_socket_callback_simulated_listener,
-    is_active, socket_callback, submit_udp_handler, udp_handler,
+    is_active, socket_callback, spawn_udp_handler, submit_udp_handler, udp_handler,
 };
-use crate::core::{Error, HandlerFuture, ServerRuntime, ServiceConfig};
+use crate::core::{Error, HandlerFuture, ServerRuntime, ServiceConfig, WorkerConcurrencyLimit};
 use crate::platform;
 use crate::runtime;
 
@@ -193,6 +193,7 @@ where
 
     let worker_executors = runtime.worker_executors();
     let worker_count = worker_executors.len();
+    let limits = worker_limits(worker_count, service_config.max_concurrency_per_worker);
     let handler = udp_handler(handler);
     let task_state = Arc::clone(&state);
     let task = runtime.submit_to_worker(0, move || async move {
@@ -212,6 +213,7 @@ where
             worker_executors,
             worker_count,
             handler,
+            limits,
         )
         .await;
     })?;
@@ -241,6 +243,7 @@ where
         ));
     }
     let runtime_active = runtime.active_flag();
+    let max_concurrency = service_config.max_concurrency_per_worker;
 
     let handler = udp_handler(handler);
     for (worker_id, socket) in sockets.into_iter().enumerate() {
@@ -249,6 +252,7 @@ where
         let task_state = Arc::clone(&state);
         let handler = Arc::clone(&handler);
         let worker_count = runtime.worker_count();
+        let limit = WorkerConcurrencyLimit::new(max_concurrency);
         let task = runtime.submit_to_worker(worker_id, move || async move {
             if task_state.register_listener_socket(&socket).is_err() {
                 return;
@@ -265,6 +269,7 @@ where
                 server_active,
                 worker_count,
                 handler,
+                limit,
             )
             .await;
         })?;
@@ -281,6 +286,7 @@ async fn quic_routed_udp_listener_loop(
     worker_executors: Vec<runtime::ExecutorHandle>,
     worker_count: usize,
     handler: UdpHandler,
+    limits: Vec<WorkerConcurrencyLimit>,
 ) {
     let mut buffer = vec![0_u8; 65_536];
     while is_active(&runtime_active, &server_active) {
@@ -312,7 +318,14 @@ async fn quic_routed_udp_listener_loop(
         let Some(executor) = worker_executors.get(worker_id) else {
             break;
         };
-        let submit_result = submit_udp_handler(executor, socket, meta, payload, handler).await;
+        let Some(limit) = limits.get(worker_id) else {
+            break;
+        };
+        let permit = limit.acquire().await;
+        if !is_active(&runtime_active, &server_active) {
+            break;
+        }
+        let submit_result = submit_udp_handler(executor, socket, meta, payload, handler, permit).await;
         if submit_result.is_err() {
             break;
         }
@@ -325,9 +338,14 @@ async fn quic_reuseport_bpf_listener_loop(
     server_active: Arc<AtomicBool>,
     worker_count: usize,
     handler: UdpHandler,
+    limit: WorkerConcurrencyLimit,
 ) {
     let mut buffer = vec![0_u8; 65_536];
     while is_active(&runtime_active, &server_active) {
+        let permit = limit.acquire().await;
+        if !is_active(&runtime_active, &server_active) {
+            break;
+        }
         let (len, peer_addr, returned_buffer) = match socket.recv_from_vec(buffer).await {
             Ok(result) => result,
             Err(_) => {
@@ -350,10 +368,18 @@ async fn quic_reuseport_bpf_listener_loop(
             peer_addr: Some(peer_addr),
             local_addr: socket.local_addr().ok(),
         };
-        if handler(socket.clone(), meta, payload.to_vec()).await.is_err() {
+        if spawn_udp_handler(socket.clone(), meta, payload.to_vec(), Arc::clone(&handler), permit)
+            .is_err()
+        {
             break;
         }
     }
+}
+
+fn worker_limits(worker_count: usize, max: Option<usize>) -> Vec<WorkerConcurrencyLimit> {
+    (0..worker_count)
+        .map(|_| WorkerConcurrencyLimit::new(max))
+        .collect()
 }
 
 fn quic_worker_index(packet: &[u8], workers: usize) -> Option<usize> {

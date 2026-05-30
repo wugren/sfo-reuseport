@@ -78,6 +78,10 @@ levels:
         name: ServiceConfig socket 创建后回调配置和错误映射
         change_ids: ["CHG-socket-init-callback"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: server-concurrency-limit-api
+        name: ServiceConfig 每 worker handler 并发上限 API 契约
+        change_ids: ["CHG-server-concurrency-limit"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: server-runtime-listener-api
         name: ServerRuntime listener 动态管理 API 缺失契约
         change_ids: ["CHG-server-runtime", "CHG-dynamic-listeners", "CHG-mixed-protocol-workers"]
@@ -156,6 +160,7 @@ levels:
     summary: loopback TCP/UDP 行为、公开接口错误路径和平台验证
     test_targets:
       - tests/integration
+      - tests/integration/server_concurrency.rs
       - src/core/tcp.rs
       - src/core/udp.rs
       - src/platform
@@ -207,6 +212,10 @@ levels:
       - id: quic-routed-udp-bpf-fallback
         name: QUIC routed UDP Linux eBPF/CBPF selector 一致性探测或用户态 fallback 稳定投递
         change_ids: ["CHG-quic-routed-udp", "CHG-platform-behavior", "CHG-udp-runtime-socket", "CHG-worker-model", "CHG-worker-thread-runtime"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: server-concurrency-limit
+        name: TCP UDP QUIC 每 worker handler 并发上限、等待和释放
+        change_ids: ["CHG-server-concurrency-limit", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp", "CHG-worker-thread-runtime"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: platform-os-matrix
         name: Linux macOS FreeBSD Windows 平台矩阵验证

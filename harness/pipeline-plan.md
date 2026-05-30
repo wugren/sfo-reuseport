@@ -7,7 +7,7 @@
 - Auto-confirm completed document stages: yes
 - Version: v0.1
 - Module(s): sfo-reuseport
-- change_id values: CHG-server-runtime, CHG-tcp-serve, CHG-udp-runtime-socket, CHG-quic-routed-udp, CHG-tokio-uring-runtime, CHG-publish-metadata, CHG-quinn-udp-socket-compat, CHG-udp-quic-listener-serve, CHG-worker-model
+- change_id values: CHG-server-runtime, CHG-tcp-serve, CHG-udp-runtime-socket, CHG-quic-routed-udp, CHG-tokio-uring-runtime, CHG-publish-metadata, CHG-quinn-udp-socket-compat, CHG-udp-quic-listener-serve, CHG-worker-model, CHG-server-concurrency-limit
 
 ## Acceptance Baseline
 - Final acceptance is judged against:
@@ -111,6 +111,11 @@
 | I-20 | implementation | complete | implement unified DCID prefix routing for QUIC Initial/0-RTT and follow-up packets | `src/core/quic.rs` | root | D-20, admission-check passed | production code | implementation complete; `cargo check` passed |
 | T-20 | testing | confirmed | verify Initial/0-RTT prefix routing and worker stability | unit/integration tests and testing docs | root | I-20 | tests and testing docs | canonical unit passed; focused integration passed; full integration stopped on pre-existing quinn interop starvation risk |
 | A-20 | acceptance | complete | audit QUIC prefix routing evidence chain | QuicServer routing final | root | T-20 | review report if needed | accepted by focused behavior and document/code/test consistency; strict stage-scope not rerun due aggregate multi-stage pipeline diff |
+| P-21 | proposal | confirmed | add per-worker server handler concurrency limit requirement | TcpServer/UdpServer/QuicServer handler concurrency | root | user request | `proposal.md` | proposal updated and user-confirmed; schema-check passed; stage-scope blocked by pre-existing untracked review files |
+| D-21 | design | confirmed | define ServiceConfig concurrency API and per-worker permit lifecycle | ServiceConfig, TCP/UDP/QUIC handler dispatch boundaries | root | P-21 | `design.md` | design maps `CHG-server-concurrency-limit`; schema/admission checks pass; stage-scope blocked by aggregate proposal/pipeline-plan and pre-existing untracked reviews |
+| I-21 | implementation | complete | implement per-worker handler concurrency permits | production code for `CHG-server-concurrency-limit` | root | D-21, admission-check passed | production code | implementation complete; default, async-std, tokio-uring, and quinn cargo checks pass |
+| T-21 | testing | confirmed | verify per-worker handler concurrency limits | tests and testing docs | root | I-21 | tests, `testing.md`, `testplan.yaml` | schema-check passed; canonical unit passed; default integration passed with 22 tests; focused server_concurrency passed with and without quinn; aggregate all/quinn integration still hits pre-existing endpoint starvation |
+| A-21 | acceptance | complete | audit per-worker concurrency limit evidence chain | concurrency limit final | root | T-21 | `docs/versions/v0.1/reviews/sfo-reuseport-v0.1-server-concurrency-limit-acceptance.md` | behavior accepted; strict process caveats are aggregate stage-scope baseline and pre-existing quinn endpoint interop hang |
 
 ## Submodule Tasks
 | Task ID | Stage | Status | Responsibility | Submodule | Parent Task | Depends On | Output | Done Condition |

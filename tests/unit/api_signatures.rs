@@ -89,6 +89,25 @@ fn server_entrypoints_are_public() {
 }
 
 #[test]
+fn service_config_exposes_per_worker_concurrency_limit() {
+    let addr = "127.0.0.1:0".parse().unwrap();
+
+    assert_eq!(ServiceConfig::new(addr).max_concurrency_per_worker(), None);
+    assert_eq!(
+        ServiceConfig::new(addr)
+            .with_max_concurrency_per_worker(0)
+            .max_concurrency_per_worker(),
+        Some(0)
+    );
+    assert_eq!(
+        ServiceConfig::new(addr)
+            .with_max_concurrency_per_worker(2)
+            .max_concurrency_per_worker(),
+        Some(2)
+    );
+}
+
+#[test]
 fn legacy_server_entrypoints_are_not_public() {
     let tcp = include_str!("../../src/core/tcp.rs");
     let udp = include_str!("../../src/core/udp.rs");

@@ -3,8 +3,8 @@ module: sfo-reuseport
 submodule:
 version: v0.1
 status: approved
-approved_by: auto-pipeline
-approved_at: 2026-05-29T11:00:39Z
+approved_by: user-request
+approved_at: 2026-05-30
 ---
 
 # sfo-reuseport 提案
@@ -33,6 +33,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - `ServiceConfig` 支持一个可选 socket 创建后回调，默认 `None`；crate 在创建底层 socket 后、执行 bind/listen 或 runtime socket 转换前调用该回调，让调用方可以设置未被 `SocketOptions` 直接覆盖的 socket 参数。
 - worker 标识默认属于内部实现细节，不作为常规 TCP/UDP/QUIC 数据处理回调参数暴露；`UdpServer::serve_socket` 和 `QuicServer::serve_socket` 的 socket-only 回调例外，必须携带该 socket 所属的 worker id，便于应用在自行驱动收包循环时建立 worker-local 状态。
 - TCP/UDP/QUIC-aware UDP server task 只能由 `TcpServer::serve`、`UdpServer::serve` 和 `QuicServer::serve` 投递到 `ServerRuntime` 的 worker 线程中执行；`serve` 返回的 `TcpServer`、`UdpServer` 或 `QuicServer` 对象必须提供显式关闭方法，关闭后相关 task 停止接受新连接或新数据包，不影响同一 runtime 中其他 server task。
+- `TcpServer`、`UdpServer` 和 `QuicServer` 必须支持通过 `ServiceConfig::max_concurrency_per_worker` 配置常规 handler 已交付工作的最大并发数；该并发数在每个 worker 线程内独立计算，默认不做限制，显式配置为 0 也表示不限制；每个 worker 各自维护许可，不做全局共享池；达到上限时必须在 accept/recv 前等待已有 handler 完成并释放新许可，不得主动丢弃连接或数据包；server 关闭时正在等待许可的 accept/recv 必须解除等待并退出。
 - `UdpServer` 和 `QuicServer` 对象必须提供获取监听 socket 的公开方法；获取时优先返回调用该方法的当前线程正在监听的 socket，如果当前线程没有该 server 的监听 socket，则从该 server 持有的监听 socket 集合中随机返回一个。
 - `UdpServer` 和 `QuicServer` 还必须提供只创建监听 socket 并通过用户回调交付该 socket 的公开 serve 入口；该回调参数必须包含统一 `UdpSocket` 和该 socket 所属 worker id；支持 `SO_REUSEPORT` worker socket 的系统上，每个 worker 的监听 socket 都必须在对应监听线程通过回调交付；不支持 `SO_REUSEPORT` worker socket 的系统也必须使用相同回调形态交付可用监听 socket，且交付给每个 worker 的 socket 必须呈现与 `SO_REUSEPORT` worker socket 相同的收包语义，只能接收该 worker 按内部调度应接收的数据；该入口内部不调用数据包 handler，除 fallback 隔离 worker socket 视图所必需的内部收包与分流外，数据读取和协议处理由应用自行实现。
 - 提供默认关闭的 `quinn` crate feature；启用该 feature 时，统一 `UdpSocket` 必须额外暴露足以让调用方为 quinn `AsyncUdpSocket` 编写轻量适配层的非阻塞 UDP I/O 接口，包括接收 poll、发送 ready poll、非阻塞发送和本地地址查询；这些接口在 `runtime-tokio` 真实监听 socket 和 fallback `RoutedUdpSocket` 视图上必须可用，其他 runtime feature 组合必须至少保持可编译并在不能提供 readiness/nonblocking 语义时返回明确 unsupported 错误。
@@ -48,7 +49,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - 不实现 QUIC TLS、handshake、connection、stream、flow control、congestion control、retransmission、ALPN、transport parameter、stateless reset 或应用层协议逻辑。
 - 不提供 TLS 终止或 TLS 配置。
 - 不直接依赖 quinn，不在本 crate 中实现 quinn `AsyncUdpSocket`，不把 quinn 或 quinn-udp 类型作为公开 API 的必需类型；`quinn` feature 只打开本 crate 自身的适配接口。
-- 不提供连接池、限流、超时策略、重试策略，或超出 worker 循环运行所必需范围的背压策略。
+- 不提供连接池、请求速率限制、超时策略、重试策略，或超出已交付 handler 并发数上限所必需范围的通用背压策略。
 - 不提供跨 worker 通信原语。
 - 不在公开 API 中暴露平台特定的 reuse-port 设置细节。
 - 不提供可接管、替换、长期持有或在 bind 之后修改 balancer socket 状态的 raw socket escape hatch；socket 创建后回调只能作为一次性初始化钩子进入，并且不得覆盖 balancer 必需的内部 reuse-port 或 bind 状态。
@@ -89,6 +90,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - IPv4/IPv6 transparent 等平台能力在非 Linux 平台上应表现为编译期不可用、运行时 `Unsupported`，还是由更通用的 capability 机制表达。
   - `TcpServer`、`UdpServer` 和 `QuicServer` 返回对象的关闭方法签名、关闭幂等性、关闭错误语义以及与 runtime drop 的先后关系需要在设计阶段定义。
   - server 对象关闭后的监听 socket 关闭、server task 退出和并发关闭边界需要在设计阶段定义。
+  - `TcpServer`、`UdpServer` 和 `QuicServer` 的并发数限制已确认使用 `ServiceConfig::max_concurrency_per_worker` 配置；默认不限制，显式 0 表示不限制；每个 worker 各自维护许可，不做全局共享池；达到上限时在 accept/recv 前等待新许可；server 关闭时正在等待许可的 accept/recv 解除等待并退出。设计阶段仍需定义具体类型、builder/API 形态、错误路径和 runtime feature 下的等待实现。
   - `UdpServer` 和 `QuicServer` 获取监听 socket 方法的返回类型、随机选择算法、无可用 socket 时的错误语义，以及跨 runtime feature 的 socket clone/share 方式需要在设计阶段定义。
   - 通过回调交付监听 socket 的 serve 入口的精确命名、回调签名、返回类型、关闭语义、是否返回生命周期对象、`SO_REUSEPORT` worker socket 和非 `SO_REUSEPORT` fallback socket 的交付次数与线程边界、fallback socket 如何保证每个 worker 只能接收自身应收数据、以及与既有 handler 型 `serve` 的重载或命名关系需要在设计阶段定义。
   - 同一 socket 地址上同时存在 TCP 与 UDP listener 时，配置 API 是否允许复用同一个逻辑名称。
@@ -110,6 +112,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - 不允许用户通过 socket 选项配置覆盖 balancer 必需的内部 reuse-port 或 worker 绑定状态。
   - 不允许 socket 创建后回调替换底层 socket、延长持有 socket 可变访问权，或在回调返回后继续修改 balancer 拥有的 socket 状态。
   - 不允许为 `TcpServer`、`UdpServer` 或 `QuicServer` 同时提供无 runtime 参数的 `serve`、`serve_with_runtime`、按 server 独立 runtime config 启动的并列入口，或其他绕过显式 `&ServerRuntime` 的 convenience 入口。
+  - 并发数限制只能约束常规 handler 型 `serve` 已交付的用户 future 数量，不得改变 worker 数量、不暴露 worker id，不得为 socket-only `serve_socket` 增加 crate 接管的应用收包循环限流。
   - 默认 features 不启用 quinn 适配接口；启用 `quinn` feature 不得改变现有 `UdpSocket` 默认 I/O 表面、server 生命周期或 worker 分配语义。
   - 不要求用户协议代码按 Linux、macOS、FreeBSD 或 Windows 分支。
   - 除 crate feature 选择外，不要求用户协议代码按 tokio、async-std 或 tokio-uring 分支。
@@ -135,6 +138,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - 用户可以通过 `serve` 入口把 TCP/UDP/QUIC-aware UDP server task 投递到 `ServerRuntime` 的 worker 线程，并让这些 task 共享同一套 worker 线程集合；`serve` 返回的 `TcpServer`、`UdpServer` 或 `QuicServer` 对象可以显式关闭对应 task。
 - 用户可以显式创建一个 `ServerRuntime`，并把 TCP/UDP/QUIC server task 投递给它执行；worker 数量在 `ServerRuntime` 初始化时确定，并被该 runtime 下的所有 server task 共享。
 - 用户通过同步的 `TcpServer::serve(&runtime, config, handler)`、`UdpServer::serve(&runtime, config, handler)` 或 `QuicServer::serve(&runtime, config, handler)` 使用单协议入口时，仍然复用同一个显式 `ServerRuntime`，公开 API 表面不出现第二套 runtime 创建方式，且调用完成 task 投递后立即返回对应 server 对象。
+- 用户可以通过 `ServiceConfig::max_concurrency_per_worker` 为 `TcpServer`、`UdpServer` 和 `QuicServer` 的常规 handler 型服务设置每个 worker 线程独立计算的最大并发数，避免单个 worker 无限启动用户 handler future；默认不设置或显式配置为 0 时不做限制并维持现有行为。
 - `UdpServer` 和 `QuicServer` 调用方可以从返回对象中获取监听 socket；获取方法在 worker 线程内调用时优先返回本线程监听 socket，在非监听线程或本线程无监听 socket 时从该 server 的监听 socket 集合中随机返回一个。
 - `UdpServer` 和 `QuicServer` 调用方也可以使用通过回调交付监听 socket 的 serve 入口自行实现读取循环；该入口只负责创建监听 socket 并在对应监听线程回调交付 socket，不在 crate 内部读取数据包。
 - 启用 `quinn` feature 的调用方可以在不依赖平台分支、且不让本 crate 直接依赖 quinn 的前提下，用统一 `UdpSocket` 编写 quinn `AsyncUdpSocket` 适配层；该适配层在 `runtime-tokio` 真实 socket 和 fallback `RoutedUdpSocket` 视图上都能通过同一组本 crate 接口完成收发，其他 runtime feature 组合在不具备 readiness/nonblocking 能力时返回明确 unsupported 错误。
@@ -157,6 +161,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | P-socket-options | CHG-socket-options | 提供受控且可扩展的 socket 选项配置，至少支持 `reuse_address` 与 IPv4/IPv6 transparent 相关设置。 | TCP/UDP bind 前 socket 选项配置、平台能力表达、错误语义和与 balancer 内部状态的冲突处理。 | 测试或文档化验证展示支持的选项被应用，不支持或无权限的选项产生明确错误，且调用方不能通过选项破坏 balancer 状态。 | 不提供任意 raw fd/raw socket 访问，不把未设计的系统 socket 选项承诺为稳定 API。 |
 | P-socket-init-callback | CHG-socket-init-callback | `ServiceConfig` 提供默认 `None` 的 socket 创建后回调；socket 创建完成后、bind/listen 或 runtime 转换前调用该回调，使调用方可设置额外 socket 参数。 | `ServiceConfig` 配置表面、TCP/UDP socket 创建路径、回调错误传播，以及与内部必需 socket 状态的冲突边界。 | 测试展示默认 `None` 不改变现有行为；配置回调时 TCP/UDP socket 创建路径都会调用它；回调返回错误会阻止服务启动并保留错误信息。 | 不允许回调接管或替换 socket，不允许在回调返回后继续修改 balancer 拥有的 socket 状态，不承诺任意平台私有选项跨平台可用。 |
 | P-dynamic-listeners | CHG-dynamic-listeners | 支持通过 `serve` 把 TCP/UDP/QUIC-aware UDP server task 投递到 `ServerRuntime` worker 线程，并通过 `serve` 返回的 server 对象显式关闭该 task。 | server task 生命周期、公开 server 对象 API 表面、runtime drop 停止边界、worker 投递状态、server 对象关闭后 socket/task 停止边界。 | API 编译覆盖证明 `TcpServer::serve`、`UdpServer::serve` 和 `QuicServer::serve` 分别返回 `TcpServer`、`UdpServer` 和 `QuicServer` 对象且对象可关闭；运行期验证关闭单个 TCP/UDP/QUIC server 对象后该 task 停止接收新工作，其他 server task 和已交付 handler future 不被强制取消。 | 不提供 `add_tcp_listener`、`add_udp_listener` 或 `add_quic_listener` 并列入口；不提供配置文件热加载或外部配置订阅；不强制取消已经交付给用户回调的工作。 |
+| P-server-concurrency-limit | CHG-server-concurrency-limit | `TcpServer`、`UdpServer` 和 `QuicServer` 支持通过 `ServiceConfig::max_concurrency_per_worker` 限制常规 handler 型服务中已交付用户 handler future 的最大并发数；该上限按每个 worker 线程独立计算，默认不限制，显式 0 也表示不限制。 | `ServiceConfig::max_concurrency_per_worker` 配置表面、TCP accept/handler 投递边界、UDP packet handler 投递边界、QUIC-aware UDP packet handler 投递边界、每 worker 线程独立许可等待与释放、关闭并发和错误语义；每个 worker 各自维护许可，不做全局共享池；达到上限时在 accept/recv 前等待新许可；server 关闭时正在等待许可的 accept/recv 解除等待并退出。 | 测试或可运行验证展示设置并发数后每个 worker 线程内 TCP 同时运行的连接 handler 不超过上限，UDP 和 QUIC-aware UDP 同时运行的 packet handler 不超过上限；达到上限时在 accept/recv 前等待该 worker 释放新许可，不主动丢弃连接或数据包；handler 完成后释放该 worker 的许可并允许后续工作进入；默认配置和显式 0 均不限制并发；关闭 server 后等待许可的任务退出且不泄漏许可或阻塞 runtime；API 编译覆盖证明配置属于 `ServiceConfig` 而不是 worker 数量。 | 不提供请求速率限制、令牌桶、超时、重试、优先级队列、跨 server 全局配额、按客户端配额或自适应负载调度；不提供跨 worker 共享并发池；不为 `serve_socket` 增加 crate 级应用读取并发控制；不改变 worker 数量配置所有权。 |
 | P-mixed-protocol-workers | CHG-mixed-protocol-workers | 同一套 worker 线程集合同时支持 TCP 和 UDP 监听项。 | worker 池、协议 server task 投递、跨协议事件调度和错误隔离。 | 测试或可运行验证展示一个服务实例内 TCP 与 UDP server task 同时工作，并共享同一 worker 配置。 | 不提供按协议独立线程池作为 v0.1 默认模型，不实现跨协议自适应调度。 |
 | P-quic-routed-udp | CHG-quic-routed-udp | 提供专门的 `QuicServer` UDP 包分配入口，按 QUIC DCID 开头的固定 2 字节 worker index 前缀将数据包稳定交付到同一 worker；Initial/0-RTT 的随机 DCID 也使用同一前缀取模作为首包分布规则，避免 server 生成 CID 回填后的 Initial 被分到不同 worker。 | 同步 `QuicServer::serve(runtime: &ServerRuntime, config: ServiceConfig, handler: F) -> Result<QuicServer, Error>`、QUIC header 路由字段读取、固定 16-bit worker index 前缀解析、long/short header 统一 DCID 前缀 worker 选择、握手期 worker 与后续 server CID worker index 前缀的闭环要求、非法或缺失路由键处理、Linux 高性能 reuse-port 路径、非 Linux 或不可用路径的行为边界、`QuicServer` 关闭方法和监听 socket 获取方法。 | 测试或可运行验证展示具备固定 2 字节 QUIC worker index 前缀的数据包被稳定路由到目标 worker；worker index 使用 16-bit 网络字节序编码；server 侧首个 Initial/0-RTT 等尚未携带本端 CID 的握手早期 packet 按 DCID 前 2 字节取模稳定落到某一 worker；该 worker 生成或交付给上层生成的 server CID 携带同一 worker index 前缀后，后续 packet 按 DCID 前缀仍回到该 worker；缺失或截断 DCID 前缀的数据包被丢弃；该入口不提供 TLS、handshake、connection 或 stream API；API 编译覆盖确认 `QuicServer` 只有一个同步 `serve` 入口、必须传入 `&ServerRuntime`，方法内部不使用 `pending` 挂起，返回 `QuicServer` 可显式关闭 QUIC-aware UDP server task，并可按本线程优先、否则随机的规则获取监听 socket。 | 不实现 QUIC 协议栈，不替代 quinn 等上层 QUIC crate，不提供 TLS 配置或 QUIC stream/connection 抽象；不支持可配置 CID layout；不支持 worker index 超过 16 bit 的 CID 路由前缀；不提供无 runtime 参数的 QUIC-aware UDP serve 入口；不把 `serve` 做成异步 lifecycle future；不把握手 fallback 扩展为来源地址 hash、随机 worker 选择或连接状态表。 |
 | P-quic-cid-generator | CHG-quic-cid-generator | 提供公开 `QuicCidGenerator`，按本 crate 固定 QUIC routing layout 生成 CID bytes。 | `QuicCidGenerator` 公开类型、默认 8 字节 CID 长度、固定 2 字节 worker index 前缀写入、OS 随机数填充剩余字节、CID 长度 8..=20 校验、worker index 到 16-bit 前缀的错误边界，以及不依赖 quinn 类型的接口。 | 单元测试证明默认生成 8 字节 CID，CID 前两个字节按网络字节序等于 worker index，随机部分从第三字节开始，后续随机字节两次生成不完全相同，长度低于 8 或高于 20 被拒绝，worker index 超过 `0xffff` 被拒绝；API 编译覆盖确认 `QuicCidGenerator` 从 crate 根可导入且不引用 quinn 类型。 | 不实现 quinn `ConnectionIdGenerator` trait，不暴露 quinn `ConnectionId`，不支持可配置 CID layout、HMAC、防伪校验、超过 16 bit 的 worker index 或持久化 CID 状态。 |
@@ -174,6 +179,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - 用户不能通过 `add_tcp_listener`、`add_udp_listener` 或 `add_quic_listener` 并列入口动态新增 listener；TCP/UDP/QUIC-aware UDP server task 通过 `TcpServer::serve`、`UdpServer::serve` 和 `QuicServer::serve` 投递到 `ServerRuntime` worker 线程，并可通过 `serve` 返回的 server 对象显式关闭。
   - `UdpServer` 和 `QuicServer` 返回对象可以获取监听 socket；如果调用线程正在监听该 server 的 socket，则优先返回本线程 socket，否则从该 server 持有的监听 socket 中随机返回一个。
   - `UdpServer` 和 `QuicServer` 提供 socket-only serve 入口；该入口创建监听 socket 并通过回调把 socket 与所属 worker id 交付给应用，`SO_REUSEPORT` 路径按 worker 监听线程交付每个 socket，fallback 路径保持相同回调形态且每个 socket 只能接收对应 worker 应收数据，crate 内部不执行 UDP handler、不执行公开可配置 QUIC-aware packet routing。
+  - `TcpServer`、`UdpServer` 和 `QuicServer` 的常规 handler 型服务支持通过 `ServiceConfig::max_concurrency_per_worker` 配置每个 worker 线程独立计算的最大并发数；达到上限时该 worker 在 accept/recv 前等待已有 handler 完成并释放新许可，不主动丢弃连接或数据包；默认配置和显式 0 均保持不限并发；server 关闭时等待许可的 accept/recv 解除等待并退出。
   - 同一个服务实例和同一套 worker 配置可以同时处理 TCP 连接和 UDP 数据包。
   - 用户可以使用 `QuicServer` 入口获得 QUIC-aware UDP 包分配能力；同一 QUIC worker index 前缀对应的数据包稳定进入同一 worker，且公开 API 不包含 TLS、handshake、connection 或 stream 配置。
   - 用户可以通过 hyper 静态文件服务器示例指定静态文件根目录并验证基础 HTTP 静态文件响应，同时该示例不改变 crate 公开 API。
@@ -184,13 +190,13 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - 平台差异不出现在公开 API 中；公开 API 不包含 Dispatcher/DispatchPolicy 或可配置调度策略。
 - 必需证据：
   - 实现前，approved `proposal.md` 和 `design.md` 都直接映射相关 `change_id`，并通过 schema/admission 检查。
-  - 实现后，测试阶段通过生成或更新测试实现、可选 `testing.md`、可选 `testplan.yaml`，覆盖 runtime feature gating、tokio-uring 公开接口可用性、统一 `UdpSocket` 跨平台 API、worker 行为、TCP 服务、UDP 服务、UDP/QUIC socket-only serve 入口、QUIC-aware UDP 包分配、serve 返回 server 对象的显式关闭能力、UDP/QUIC server 对象获取监听 socket 能力、混合协议 worker、Linux 兼容内部调度、socket 选项配置和平台特定编译验证。
+  - 实现后，测试阶段通过生成或更新测试实现、可选 `testing.md`、可选 `testplan.yaml`，覆盖 runtime feature gating、tokio-uring 公开接口可用性、统一 `UdpSocket` 跨平台 API、worker 行为、TCP 服务、UDP 服务、UDP/QUIC socket-only serve 入口、QUIC-aware UDP 包分配、serve 返回 server 对象的显式关闭能力、TCP/UDP/QUIC 常规 handler 并发数限制、UDP/QUIC server 对象获取监听 socket 能力、混合协议 worker、Linux 兼容内部调度、socket 选项配置和平台特定编译验证。
   - `CHG-hyper-static-example` 实现后，测试阶段覆盖示例编译、可配置静态根目录、基础 200/404 响应和路径遍历拒绝。
   - `CHG-quinn-udp-socket-compat` 实现后，测试阶段覆盖默认关闭的 `quinn` feature gate、启用 feature 后 `UdpSocket` quinn 适配接口可见、`runtime-tokio` 真实 socket 与 fallback routed socket 都能通过这些接口完成非阻塞收发、其他 runtime 组合可编译且不具备 readiness/nonblocking 能力时返回 unsupported，以及本 crate 不直接依赖或实现 quinn `AsyncUdpSocket`。
   - `CHG-publish-metadata` 实现后，验证 package manifest 与文件列表满足发布前检查，并确认元数据没有扩大公开 API 或协议能力承诺。
   - 已实现变更集的 canonical harness 测试命令通过；若某个平台特定验证路径为 manual，必须明确记录原因。
 - 明确非目标：
-  - 不提供通用协议解析器、TLS 栈、QUIC 协议栈、连接池、限流器、超时管理器、重试系统或跨 worker channel 抽象。
+  - 不提供通用协议解析器、TLS 栈、QUIC 协议栈、连接池、请求速率限制器、超时管理器、重试系统或跨 worker channel 抽象。
 
 ## 风险
 - 如果公开类型没有通过 feature 仔细隔离，runtime 抽象可能泄漏。
@@ -200,6 +206,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - 如果 API bounds 过于含糊，多线程回调执行会掩盖统一 `UdpSocket` 在 runtime 原生 socket、Linux reuse-port socket 和 Windows/fallback 模拟 socket 之间的 clone/share、所有权和生命周期要求。
 - `serve` 返回 server 对象的 API 如果过宽，调用方会误以为 crate 支持任意动态 listener 管理、配置热加载或强制取消已交付 handler；设计和测试必须限制公开面只覆盖对应 server task 的显式关闭，以及 UDP/QUIC 监听 socket 获取能力。
 - 如果 server 对象关闭与 worker task、socket 关闭或 runtime drop 的并发边界定义不足，可能出现重复关闭、关闭后仍接收新工作、其他 server task 被误停或 handler future 被意外取消。
+- 如果 handler 并发数限制的计数、许可等待和释放策略定义不足，可能导致 TCP 连接饥饿、UDP/QUIC 数据包无界排队、handler 错误路径泄漏许可，或关闭 server 时永久等待。
 - 如果 `UdpServer` 或 `QuicServer` 获取监听 socket 的线程优先和随机 fallback 规则定义不足，可能导致响应路径使用错误 socket、跨 worker 路由不稳定或关闭后返回无效 socket。
 - TCP 与 UDP 共享同一 worker 池后，若调度和错误隔离设计不足，单一协议的高负载或 handler 错误可能影响另一协议的可用性。
 - 如果 `QuicServer` 的命名没有清楚限定为 UDP 包分配入口，调用方可能误以为本 crate 提供完整 QUIC server、TLS 或 stream 语义。
@@ -214,6 +221,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | data/schema | no | 不涉及持久化数据、schema、缓存键或迁移。 | none | none | none | none |
 | security/privacy/permission | yes | `QuicServer` 解析来自网络的不可信 UDP payload，Linux 高性能路径可能涉及 eBPF/CBPF 加载权限。 | design 需定义输入信任边界、非法包拒绝路径和 eBPF 权限失败处理；post-implementation testing 至少包含负例或滥用路径。 | none | design 阶段先补齐实现边界；实现后 testing 阶段补齐验证。 | 解析或权限失败策略未定前不能进入实现。 |
 | runtime/integration | yes | 变更 UDP/TCP worker 分配、reuse-port 行为、Linux 兼容 fallback 调度、server task lifecycle、server 对象关闭路径、UDP/QUIC 监听 socket 获取路径，以及 socket-only serve 的回调交付和读取所有权边界。 | design 需描述 Linux 兼容调度输入、路由生命周期、server 对象关闭停止边界、监听 socket 选择规则、socket-only serve 的 socket 创建、回调线程、回调次数、fallback socket 按 worker 隔离收包的机制、资源释放规则、失败行为和 fallback；post-implementation testing 需覆盖 unit/DV/integration 路径。 | none | design 阶段先补齐实现边界；实现后 testing 阶段补齐验证。 | 高负载、关闭并发、socket 选择、应用自读 socket 与内部 worker socket 的所有权边界、平台差异、fallback worker 收包隔离和回调线程边界风险需后续验证。 |
+| runtime/integration | yes | 新增 `TcpServer`、`UdpServer` 和 `QuicServer` 常规 handler 并发数限制会改变 listener loop、handler 投递、完成释放和关闭并发边界。 | design 需定义 `ServiceConfig::max_concurrency_per_worker` 的具体类型和 builder/API 形态、默认不限制、显式 0 不限制、每个 worker 线程独立计数、accept/recv 前等待新许可、许可释放和 close/drop 解除等待边界；post-implementation testing 需覆盖上限命中、释放后继续处理、默认和 0 不限、关闭不泄漏和三种 server 类型。 | none | design 阶段先补齐接口与运行时边界；实现后 testing 阶段补齐验证。 | 若许可等待与 handler panic/错误路径耦合，可能导致连接饥饿、数据包无界排队或永久阻塞。 |
 | build/dependency/config/deployment | yes | Linux 高性能路径可能引入 eBPF/CBPF 相关 build、feature 或平台配置。 | design 需声明 feature/dependency/config 表面；post-implementation testing 需包含可复现构建或配置验证。 | none | design 阶段先补齐实现边界；实现后 testing 阶段补齐验证。 | eBPF 依赖和权限模型未定。 |
 | build/dependency/config/deployment | yes | 新增 `runtime-tokio-uring` feature 会引入 tokio-uring 依赖、Linux 平台 cfg 和互斥 feature 组合。 | design 需声明依赖版本、feature 互斥规则、非 Linux 行为和 worker runtime 启动方式；post-implementation testing 需覆盖 feature 编译矩阵和 tokio-uring handler API。 | none | design 阶段先补齐实现边界；实现后 testing 阶段补齐验证。 | tokio-uring 依赖和平台限制未设计前不能进入实现。 |
 | build/dependency/config/deployment | yes | 新增默认关闭的 `quinn` feature 会改变 Cargo feature 表面，并在启用时公开额外 `UdpSocket` 适配接口。 | design 需声明 `quinn` feature 是否引入可选依赖、默认 feature 边界、公开接口签名和与 runtime feature 的组合规则；post-implementation testing 需覆盖默认不可见、启用后可见和本 crate 不直接实现 quinn trait 的编译契约。 | none | design 阶段先补齐 feature 和接口边界；实现后 testing 阶段补齐验证。 | 若 feature 命名或接口语义与 quinn 版本强绑定，可能造成额外维护成本。 |
@@ -238,6 +246,10 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | FU-009 | design | 定义 `serve` 返回 `TcpServer`、`UdpServer`、`QuicServer` 对象的最小公开 API 形态、显式关闭方法、关闭幂等性、并发边界、socket/server task 停止语义、runtime drop 交互，并继续禁止 `add_tcp_listener`、`add_udp_listener` 和 `add_quic_listener` 并列入口。 | P-dynamic-listeners/P-mixed-protocol-workers/P-workers/P-tcp/P-udp/P-quic-routed-udp | yes |
 | FU-010 | testing | 更新测试计划，新增 TCP/UDP/QUIC server 对象关闭验证、关闭后不再接收新工作、其他 server task 不受影响、已交付 handler 不被强制取消，以及未暴露 `add_*_listener` 并列入口的 API 覆盖。 | P-dynamic-listeners/P-mixed-protocol-workers/P-workers/P-tcp/P-udp/P-quic-routed-udp | yes |
 | FU-011 | implementation | 仅在 design 重新批准且 `CHG-dynamic-listeners` 实现准入通过后，为 `TcpServer`、`UdpServer` 和 `QuicServer` 的 `serve` 分别返回可显式关闭对应 server task 的 `TcpServer`、`UdpServer` 和 `QuicServer` 对象；相关验证归属后续 testing 阶段。 | P-dynamic-listeners/P-mixed-protocol-workers/P-quic-routed-udp | yes |
+| FU-057 | design | 定义 `ServiceConfig::max_concurrency_per_worker` 的具体类型和 builder/API 形态；同步 `TcpServer`、`UdpServer` 和 `QuicServer` 常规 handler 并发数限制的默认不限、显式 0 不限、每个 worker 线程独立计数、accept/recv 前等待新许可、许可释放、错误路径和 close/drop 解除等待边界，并说明 `serve_socket` 不纳入 crate 级 handler 并发控制。 | P-server-concurrency-limit/P-tcp/P-udp/P-quic-routed-udp/P-dynamic-listeners | yes |
+| FU-058 | testing | 为 `CHG-server-concurrency-limit` 增加测试计划和 API 编译契约，覆盖 `ServiceConfig::max_concurrency_per_worker`、TCP/UDP/QUIC-aware UDP 的每 worker 线程并发上限、上限命中后在 accept/recv 前等待新许可且不主动丢弃连接或数据包、handler 完成释放本 worker 许可、默认和显式 0 不限并发、关闭时等待许可的 accept/recv 退出、不改变 worker 数量配置所有权，以及 socket-only serve 不被该限制接管。 | P-server-concurrency-limit | yes |
+| FU-059 | implementation | 仅在 proposal/design 重新批准且 `CHG-server-concurrency-limit` 实现准入通过后，在 `TcpServer`、`UdpServer` 和 `QuicServer` 常规 handler 投递路径中实施并发数限制；相关测试代码和测试元数据在后续 testing 阶段同步。 | P-server-concurrency-limit | yes |
+| FU-060 | acceptance | 并发数限制实现和验证完成后，审计 proposal、design、代码、测试和运行结果是否一致，特别检查三种 server 的上限语义、默认兼容行为和 `serve_socket` 非目标边界。 | P-server-concurrency-limit | yes |
 | FU-012 | design | 将公开服务 task 投递入口收敛为 `ServerRuntime`，并移除 server config 对 worker 数量的所有权。 | P-server-runtime/P-workers/P-dynamic-listeners/P-mixed-protocol-workers | yes |
 | FU-013 | testing | 增加 `ServerRuntime` 共享 worker 配置和 server config 不暴露 worker 设置的直接验证。 | P-server-runtime/P-workers/P-dynamic-listeners/P-mixed-protocol-workers | yes |
 | FU-014 | implementation | 在 `CHG-server-runtime` 实现准入通过后，迁移公开 API 与测试到 `ServerRuntime` 模型。 | P-server-runtime | yes |

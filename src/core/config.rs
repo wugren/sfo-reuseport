@@ -11,6 +11,7 @@ pub struct ServiceConfig {
     pub bind_addr: SocketAddr,
     pub socket_options: SocketOptions,
     pub socket_init_callback: Option<SocketInitCallback>,
+    pub max_concurrency_per_worker: Option<usize>,
 }
 
 impl ServiceConfig {
@@ -19,6 +20,7 @@ impl ServiceConfig {
             bind_addr,
             socket_options: SocketOptions::default(),
             socket_init_callback: None,
+            max_concurrency_per_worker: None,
         }
     }
 
@@ -38,6 +40,15 @@ impl ServiceConfig {
     pub fn without_socket_init_callback(mut self) -> Self {
         self.socket_init_callback = None;
         self
+    }
+
+    pub fn with_max_concurrency_per_worker(mut self, max: usize) -> Self {
+        self.max_concurrency_per_worker = Some(max);
+        self
+    }
+
+    pub fn max_concurrency_per_worker(&self) -> Option<usize> {
+        self.max_concurrency_per_worker
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {

@@ -1,4 +1,5 @@
 mod cid;
+mod concurrency;
 mod config;
 mod error;
 mod quic;
@@ -22,6 +23,7 @@ pub use tcp::TcpServer;
 pub use udp::{PacketMeta, UdpServer, UdpSocket};
 
 pub(crate) use schedule::linux_reuseport_select;
+pub(crate) use concurrency::{ConcurrencyPermit, WorkerConcurrencyLimit};
 
 #[cfg(feature = "runtime-tokio-uring")]
 pub(crate) type HandlerFutureBox = Pin<Box<dyn Future<Output = Result<(), Error>>>>;

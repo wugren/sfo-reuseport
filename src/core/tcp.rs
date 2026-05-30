@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use crate::core::{
-    Error, HandlerFuture, HandlerFutureBox, PacketMeta, ServerRuntime, ServiceConfig,
-    linux_reuseport_select,
+    ConcurrencyPermit, Error, HandlerFuture, HandlerFutureBox, PacketMeta, ServerRuntime,
+    ServiceConfig, WorkerConcurrencyLimit, linux_reuseport_select,
 };
 use crate::platform;
 use crate::runtime::{self, TcpStream};
@@ -89,17 +89,19 @@ where
         ));
     }
     let runtime_active = runtime.active_flag();
+    let max_concurrency = service_config.max_concurrency_per_worker;
 
     let handler = tcp_handler(handler);
     for (worker_id, listener) in listeners.into_iter().enumerate() {
         let runtime_active = Arc::clone(&runtime_active);
         let handler = Arc::clone(&handler);
+        let limit = WorkerConcurrencyLimit::new(max_concurrency);
         let task = runtime.submit_to_worker(worker_id, move || async move {
             let Ok(listener) = runtime::tcp_listener_from_std(listener).map_err(Error::from)
             else {
                 return;
             };
-            tcp_listener_loop(listener, runtime_active, handler).await;
+            tcp_listener_loop(listener, runtime_active, handler, limit).await;
         })?;
         state.register_task(task)?;
     }
@@ -129,6 +131,7 @@ where
 
     let worker_executors = runtime.worker_executors();
     let worker_count = worker_executors.len();
+    let limits = worker_limits(worker_count, service_config.max_concurrency_per_worker);
     let handler = tcp_handler(handler);
     let task = runtime.submit_to_worker(0, move || async move {
         let Ok(listener) = runtime::tcp_listener_from_std(listener).map_err(Error::from) else {
@@ -141,6 +144,7 @@ where
             worker_count,
             addr,
             handler,
+            limits,
         )
         .await;
     })?;
@@ -164,15 +168,20 @@ async fn tcp_listener_loop(
     listener: runtime::TcpListener,
     runtime_active: Arc<AtomicBool>,
     handler: TcpHandler,
+    limit: WorkerConcurrencyLimit,
 ) {
     while is_active(&runtime_active) {
+        let permit = limit.acquire().await;
+        if !is_active(&runtime_active) {
+            break;
+        }
         let Ok((stream, _)) = listener.accept().await else {
             break;
         };
         if !is_active(&runtime_active) {
             break;
         }
-        if handler(stream).await.is_err() {
+        if spawn_tcp_handler(stream, Arc::clone(&handler), permit).is_err() {
             break;
         }
     }
@@ -185,6 +194,7 @@ async fn simulated_tcp_accept_loop(
     worker_count: usize,
     local_addr: std::net::SocketAddr,
     handler: TcpHandler,
+    limits: Vec<WorkerConcurrencyLimit>,
 ) {
     while is_active(&runtime_active) {
         let Ok((stream, peer_addr)) = listener.accept().await else {
@@ -203,15 +213,24 @@ async fn simulated_tcp_accept_loop(
         let Some(executor) = worker_executors.get(worker_id) else {
             break;
         };
+        let Some(limit) = limits.get(worker_id) else {
+            break;
+        };
+        let permit = limit.acquire().await;
+        if !is_active(&runtime_active) {
+            break;
+        }
         let handler = Arc::clone(&handler);
         #[cfg(feature = "runtime-tokio-uring")]
         let submit_result: Result<(), Error> = {
             let _ = executor;
+            let _permit = permit;
             let _ = handler(stream).await;
             Ok(())
         };
         #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
         let submit_result = ServerRuntime::submit_to_executor(executor, move || async move {
+            let _permit = permit;
             let _ = handler(stream).await;
         });
         if submit_result.is_err() {
@@ -222,6 +241,25 @@ async fn simulated_tcp_accept_loop(
 
 fn is_active(runtime_active: &AtomicBool) -> bool {
     runtime_active.load(Ordering::SeqCst)
+}
+
+fn worker_limits(worker_count: usize, max: Option<usize>) -> Vec<WorkerConcurrencyLimit> {
+    (0..worker_count)
+        .map(|_| WorkerConcurrencyLimit::new(max))
+        .collect()
+}
+
+fn spawn_tcp_handler(
+    stream: TcpStream,
+    handler: TcpHandler,
+    permit: ConcurrencyPermit,
+) -> Result<(), Error> {
+    runtime::spawn(async move {
+        let _permit = permit;
+        let _ = handler(stream).await;
+    })
+    .map(|_| ())
+    .map_err(Error::from)
 }
 
 fn select_simulated_tcp_worker(
