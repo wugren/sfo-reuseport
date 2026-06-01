@@ -21,19 +21,35 @@ pub(crate) type ExecutorTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>
 pub(crate) type ExecutorHandle = CurrentThreadExecutor;
 
 pub struct TaskHandle {
-    task: Option<async_executor::Task<()>>,
+    task: Option<TaskHandleInner>,
+}
+
+enum TaskHandleInner {
+    Executor(async_executor::Task<()>),
+    Local(async_std::task::JoinHandle<()>),
 }
 
 impl TaskHandle {
     pub fn cancel(mut self) {
-        self.task.take();
+        match self.task.take() {
+            Some(TaskHandleInner::Executor(task)) => {
+                drop(task);
+            }
+            Some(TaskHandleInner::Local(handle)) => {
+                let _ = async_std::task::block_on(handle.cancel());
+            }
+            None => {}
+        }
     }
 }
 
 impl Drop for TaskHandle {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
-            task.detach();
+            match task {
+                TaskHandleInner::Executor(task) => task.detach(),
+                TaskHandleInner::Local(handle) => drop(handle),
+            }
         }
     }
 }
@@ -46,12 +62,14 @@ where
     Box::pin(task())
 }
 
-pub fn spawn<F>(future: F) -> io::Result<TaskHandle>
+pub fn spawn_local<F>(future: F) -> io::Result<TaskHandle>
 where
-    F: Future<Output = ()> + Send + 'static,
+    F: Future<Output = ()> + 'static,
 {
     CURRENT_EXECUTOR.with(|current| match current.borrow().as_ref() {
-        Some(executor) => executor.spawn(future),
+        Some(_) => Ok(TaskHandle {
+            task: Some(TaskHandleInner::Local(async_std::task::spawn_local(future))),
+        }),
         None => Err(io::Error::new(
             io::ErrorKind::NotConnected,
             "no current sfo-reuseport async-std executor on this thread",
@@ -107,7 +125,7 @@ impl CurrentThreadExecutor {
         F: Future<Output = ()> + Send + 'static,
     {
         Ok(TaskHandle {
-            task: Some(self.executor.spawn(future)),
+            task: Some(TaskHandleInner::Executor(self.executor.spawn(future))),
         })
     }
 

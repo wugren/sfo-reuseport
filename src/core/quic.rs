@@ -323,10 +323,9 @@ async fn quic_routed_udp_listener_loop(
         let Some(limit) = limits.get(worker_id) else {
             break;
         };
-        let permit = limit.acquire().await;
-        if !is_active(&runtime_active, &server_active) {
-            break;
-        }
+        let Some(permit) = limit.try_acquire() else {
+            continue;
+        };
         let submit_result = submit_udp_handler(executor, socket, meta, payload, handler, permit).await;
         if submit_result.is_err() {
             break;

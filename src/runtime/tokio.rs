@@ -37,13 +37,11 @@ where
     Box::pin(task())
 }
 
-pub fn spawn<F>(future: F) -> io::Result<TaskHandle>
+pub fn spawn_local<F>(future: F) -> io::Result<TaskHandle>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let handle = tokio::runtime::Handle::try_current()
-        .map_err(|error| io::Error::new(io::ErrorKind::NotConnected, error))?
-        .spawn(future);
+    let handle = tokio::task::spawn(future);
     Ok(TaskHandle { handle })
 }
 

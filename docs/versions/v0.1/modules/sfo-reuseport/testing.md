@@ -4,7 +4,7 @@ submodule:
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-05-30T00:00:00Z
+approved_at: 2026-06-01T00:00:00+08:00
 ---
 
 # sfo-reuseport 测试
@@ -40,7 +40,7 @@ approved_at: 2026-05-30T00:00:00Z
 | tokio-uring runtime feature | `runtime-tokio-uring` 互斥 feature、Linux cfg、公开 socket 类型和 handler API。 | unit/dv | tokio-uring feature 可在 Linux 下编译；与其他 runtime feature 互斥；公开 `TcpStream` 与统一 `UdpSocket` 类型可导入；tokio-uring all-targets 编译覆盖 handler 中使用统一 UDP send/recv 接口的类型边界。 | automated | `tests/unit/runtime_features.rs`、`cargo check --no-default-features --features runtime-tokio-uring --all-targets` via `test-run.py` dv | ready | 非 Linux 由 compile_error 边界覆盖，需要目标平台编译验证。 |
 | server runtime API | `ServerRuntime` 命名、共享 worker 配置、server config 不含 worker 设置，以及单协议 server 入口只接受显式 runtime 并同步返回 server 对象。 | unit/integration | `ServerRuntimeConfig` 可设置 worker；`TcpServiceConfig`/`UdpServiceConfig` 不暴露 worker 字段或 `with_workers`；`TcpServer`、`UdpServer`、`QuicServer` 不暴露 `serve_with_runtime` 或无 runtime 参数的 `serve`；`ServerRuntime` 不暴露 `add_tcp_listener`、`add_udp_listener`、`add_quic_listener` 或 `remove_listener`；crate 根不导出 `ListenerId`/`ListenerProtocol`；`serve` 返回 `Result<TcpServer, Error>`、`Result<UdpServer, Error>` 或 `Result<QuicServer, Error>` 而不是 future，且生产代码不使用 `pending` 挂起；server 对象可 `close` 停止对应服务 task；多个 TCP/UDP listener 通过 `serve` 注册到同一 runtime。 | automated | `tests/unit/server_runtime.rs`、`tests/unit/api_signatures.rs`、`tests/integration/dynamic_listeners.rs` | ready | |
 | service config split | TCP 与 UDP/QUIC service config 是不同公开类型。 | unit/integration | `TcpServer::serve` 接受 `TcpServiceConfig`；`UdpServer` 和 `QuicServer` 接受 `UdpServiceConfig`；`TcpServiceConfig` 不提供 routed packet channel capacity；`UdpServiceConfig` 仅在 Windows 公开该配置并默认 4096；crate root 不导出共用 service config。 | automated | `tests/unit/api_signatures.rs`、`tests/unit/server_runtime.rs`、`tests/integration/*` | ready | |
-| server handler concurrency limit | `TcpServer`、`UdpServer` 和 `QuicServer` handler 型 `serve` 的每 worker 已交付 handler future 上限。 | unit/integration | `TcpServiceConfig::max_concurrency_per_worker` / `UdpServiceConfig::max_concurrency_per_worker` 默认 `None` 且显式 0 均不限流；设置为 1 时单 worker TCP/UDP/QUIC 同时运行的 handler 不超过 1；后续连接或 packet 等待许可释放后进入，不主动丢弃；server close 唤醒等待许可的 loop。 | automated | `tests/unit/api_signatures.rs`、`tests/integration/server_concurrency.rs` | ready | |
+| server handler concurrency limit | `TcpServer`、`UdpServer` 和 `QuicServer` handler 型 `serve` 的每 worker 已交付 handler future 上限。 | unit/integration/source-review | `TcpServiceConfig::max_concurrency_per_worker` / `UdpServiceConfig::max_concurrency_per_worker` 默认 `None` 且显式 0 均不限流；设置为 1 时单 worker TCP/UDP/QUIC 同时运行的 handler 不超过 1；native listener 达到上限后等待许可释放；用户态模拟 TCP/UDP/QUIC 路径映射到满载 worker 的已收工作被丢弃且不会阻塞后续 accept/recv；server close 唤醒等待许可的 native loop；`src/core/concurrency.rs` 不使用 `Mutex` 或 waiter 列表，permit helper 使用单 waiter 通知模型并提供非阻塞 `try_acquire`。 | automated | `tests/unit/api_signatures.rs`、`src/core/concurrency.rs` 内部 unit、`tests/integration/server_concurrency.rs`、`src/core/tcp.rs`/`src/core/udp.rs`/`src/core/quic.rs` source review | ready | |
 | worker thread runtime | 每个 worker 对应独立 OS 线程，线程内运行单线程 async runtime。 | unit/integration | worker 启动路径使用 runtime worker-thread API；TCP/UDP listener loop 不直接使用调用方 runtime spawn 代表 worker。 | automated | `tests/unit/worker_runtime.rs`、`tests/integration/dynamic_listeners.rs` | ready | |
 | worker model | 默认 CPU 数、显式 worker 数、0 worker 配置错误、常规 handler 回调签名不含 worker id，socket-only 回调包含 socket 所属 worker id。 | unit | worker 数解析符合设计；公开 TCP/UDP/QUIC handler 类型不接收 worker id；`serve_socket` 回调接收 worker id。 | automated | `tests/unit/worker_model.rs`、compile-time API tests | ready | |
 | Linux compatible scheduling | Dispatcher/DispatchPolicy 不公开，fallback 用户态路径使用 Linux 兼容内部调度。 | unit/integration | `ServerRuntimeConfig` 不暴露 dispatch 配置；crate 根不能导入 `DispatchPolicy`；内部调度对固定 TCP/UDP metadata 稳定选择 worker；fallback 路径不会调用用户自定义 selector。 | automated | `tests/unit/api_signatures.rs`、`tests/unit/schedule.rs`、`tests/integration/udp_serve.rs` | ready | |
@@ -71,7 +71,7 @@ approved_at: 2026-05-30T00:00:00Z
 | `examples/hyper_static.rs` | 展示上层 HTTP 协议如何接入 `TcpServer` 并服务静态文件。 | `--root` 指向临时目录时可返回普通文件和 `index.html`。 | 缺失文件返回 404；路径遍历和编码后的路径遍历返回 403；不改变 library API。 | dv | `harness/scripts/test-hyper-static-example.py` | ready | |
 | public error API | 统一错误语义，不要求调用方按平台分支。 | unsupported、permission-denied、invalid config、invalid worker index 可区分。 | 源错误保留但不泄漏平台 API 变体。 | unit | `tests/unit/error.rs` | ready | |
 | `TcpServiceConfig::with_socket_init_callback` / `UdpServiceConfig::with_socket_init_callback` | TCP/UDP 底层 socket 创建后一次性初始化。 | 回调可被配置，默认 `None`，TCP/UDP 创建路径调用回调。 | 回调返回错误时服务启动失败；回调不能替换或长期持有 socket。 | unit/dv | `tests/unit/socket_init_callback.rs`、`tests/dv/socket_init_callback.rs` | ready | |
-| `TcpServiceConfig::max_concurrency_per_worker` / `UdpServiceConfig::max_concurrency_per_worker` | 配置常规 handler 型 server 的每 worker 并发上限。 | 默认 `None` 不限流；builder 写入 `Some(max)`；`Some(0)` 按不限流处理；`TcpServer`、`UdpServer`、`QuicServer` 共享该配置语义。 | 不改变 worker 数量；不为 `serve_socket` 增加 crate 级应用读取限流；达到上限等待许可而不是丢弃连接或 packet。 | unit/integration | `tests/unit/api_signatures.rs`、`tests/integration/server_concurrency.rs` | ready | |
+| `TcpServiceConfig::max_concurrency_per_worker` / `UdpServiceConfig::max_concurrency_per_worker` | 配置常规 handler 型 server 的每 worker 并发上限。 | 默认 `None` 不限流；builder 写入 `Some(max)`；`Some(0)` 按不限流处理；`TcpServer`、`UdpServer`、`QuicServer` 共享该配置语义；permit helper 不依赖 `Mutex` 或多 waiter 队列；非阻塞 `try_acquire` 满载时返回 `None`。 | 不改变 worker 数量；不为 `serve_socket` 增加 crate 级应用读取限流；native 路径达到上限等待许可；用户态模拟路径达到目标 worker 上限时丢弃已收工作并继续循环。 | unit/integration/source-review | `tests/unit/api_signatures.rs`、`src/core/concurrency.rs` 内部 unit、`tests/integration/server_concurrency.rs`、`src/core/tcp.rs`/`src/core/udp.rs`/`src/core/quic.rs` source review | ready | |
 | Windows-only `UdpServiceConfig::routed_packet_channel_capacity` | 配置 Windows UDP/QUIC fallback routed packet channel 的每 worker 队列容量。 | 默认值等于接口层 `DEFAULT_ROUTED_PACKET_CHANNEL_CAPACITY` 4096；Windows builder 可覆盖容量；显式 0 在 `UdpServer`/`QuicServer` 校验中被拒绝；非 Windows 不暴露公开 builder/getter；`TcpServer` 不读取、不校验该字段。 | 不改变 TCP 服务、runtime executor task channel，不为测试夹具 channel 增加公开配置；实现审查生产代码中其他无界 channel。 | unit | `tests/unit/api_signatures.rs` | ready | |
 
 ## Direct Change Coverage
@@ -118,7 +118,7 @@ approved_at: 2026-05-30T00:00:00Z
 | 平台差异不进入公开 API。 | 当前目标 DV 编译、平台能力 unit tests、OS matrix/manual 验证。 | 当前目标可自动验证；非当前 OS 需要矩阵或人工环境。 | 单机无法覆盖全部 OS。 |
 | socket options 不能破坏 balancer 状态。 | 配置 unit tests 和 DV socket setup tests。 | 验证受控配置、错误分类和禁止 raw escape hatch 的 API 表面。 | transparent 特权路径需 manual。 |
 | socket 创建后回调可能改变启动路径或吞掉错误。 | unit 测试断言默认 `None`、builder API 和错误枚举；DV 测试通过 TCP/UDP bind 入口观察回调调用与错误传播。 | 回调行为集中在 `TcpServiceConfig`/`UdpServiceConfig` 和平台 bind 路径，unit/DV 可以直接覆盖不启动完整长生命周期服务的关键边界。 | |
-| handler 并发限制可能泄漏许可、丢弃工作或错误地变成全局池。 | API 测试覆盖 `TcpServiceConfig::max_concurrency_per_worker` / `UdpServiceConfig::max_concurrency_per_worker` 默认值、builder 和显式 0；integration 测试用单 worker、上限 1 阻塞首个 TCP/UDP/QUIC handler，断言第二个工作在释放许可前不进入、释放后进入；close 路径覆盖等待许可的 loop 退出。 | 单 worker 场景能稳定证明每 worker permit 的关键语义、许可释放和不丢弃行为；多 worker 的独立计数由每 worker 私有 permit 实现和设计审计覆盖，不引入全局共享池。 | fallback 用户态路径在收到 worker routing 信息后才能等待目标 worker permit；当前自动化重点覆盖 native worker loop 的 accept/recv 前等待语义。 |
+| handler 并发限制可能泄漏许可、错误地变成全局池、在用户态模拟路径阻塞整个 accept/recv loop，或重新引入跨线程 `Mutex`/waiter 列表。 | API 测试覆盖 `TcpServiceConfig::max_concurrency_per_worker` / `UdpServiceConfig::max_concurrency_per_worker` 默认值、builder 和显式 0；`src/core/concurrency.rs` 内部 unit 覆盖 `try_acquire` 无限流和满载返回 `None`；integration 测试用单 worker、上限 1 阻塞首个 TCP/UDP/QUIC handler，断言 native 第二个工作在释放许可前不进入、释放后进入；QUIC 用户态 fallback 测试强制关闭 BPF，断言满载 worker 的第二个 packet 被丢弃、释放许可后不会补交旧 packet、后续新 packet 仍能进入；close 路径覆盖等待许可的 loop 退出；source review 检查 `src/core/concurrency.rs` 使用原子 active 计数和单个 waker，不使用 `Mutex` 或 waiter `Vec`，并检查 `src/core/tcp.rs`、`src/core/udp.rs`、`src/core/quic.rs` 的模拟 loop 使用 `try_acquire` 而非 await。 | 单 worker 场景能稳定证明每 worker permit 的关键语义、许可释放和 native 等待行为；QUIC fallback integration 真实覆盖用户态 recv loop 不因满载 worker 阻塞；TCP/UDP 模拟路径使用同一 `try_acquire` 模式并通过源码审查覆盖；多 worker 的独立计数由每 worker 私有 permit 实现和设计审计覆盖，不引入全局共享池。 | TCP/UDP fallback 路径需要非 Linux 或不支持 reuse-port 平台才能端到端运行；当前单机自动化用 QUIC 强制 fallback 加源码审查覆盖同类 TCP/UDP 模拟 loop。 |
 | listener 动态管理 API 误暴露。 | unit/API 测试断言 `ServerRuntime` 不公开 `add_tcp_listener`、`add_udp_listener`、`add_quic_listener` 和 `remove_listener`，crate 根不导出 `ListenerId`/`ListenerProtocol`；integration test 通过三个 `serve` 入口证明 listener 仍可注册并处理工作，并覆盖返回对象 `close` 与 UDP/QUIC `listener_socket`。 | 同时覆盖公开 API 收窄和保留的 TCP/UDP/QUIC-aware UDP 服务能力。 | |
 | TCP 与 UDP 必须共享同一服务实例。 | integration test 在一个 `ServerRuntime` 上同时注册 TCP 与 UDP listener 并观察两个 handler。 | 直接验证混合协议入口和共享 worker 配置。 | |
 | `QuicServer` 不能变成 QUIC 协议栈。 | API 编译测试只使用 UDP packet handler；测试中不存在 TLS、connection、stream 配置入口。 | 公开接口和测试输入共同证明本 crate 只负责 packet routing。 | |
@@ -175,7 +175,7 @@ approved_at: 2026-05-30T00:00:00Z
 | mixed protocol runtime service | 同一 `ServerRuntime` 实例同时处理 TCP 与 UDP listener。 | `tests/integration/dynamic_listeners.rs` |
 | QUIC routed UDP worker stability | `QuicServer` 将 Initial/0-RTT DCID 前缀 packet 和带 DCID worker index 前缀的 packet 投递到对应 worker。 | `tests/integration/quic_routed_udp.rs` |
 | QUIC routed UDP BPF fallback | Linux BPF selector 可用且与用户态算法一致时经每 worker socket 投递；不可用、不一致或非 Linux 时经用户态 fallback 仍稳定投递。 | `tests/integration/quic_routed_udp.rs` |
-| server concurrency limit | TCP/UDP/QUIC handler 型 `serve` 在每 worker 上限为 1 时等待许可释放后才交付第二个工作，不主动丢弃连接或 packet。 | `tests/integration/server_concurrency.rs` |
+| server concurrency limit | TCP/UDP/QUIC handler 型 `serve` 在 native 每 worker 上限为 1 时等待许可释放后才交付第二个工作；QUIC 用户态 fallback 在满载 worker 上丢弃已收 packet 且不阻塞后续 recv；permit helper 非阻塞满载检查由内部 unit 覆盖。 | `src/core/concurrency.rs`、`tests/integration/server_concurrency.rs` |
 | platform OS matrix | Linux、macOS、FreeBSD、Windows 编译和 smoke test。 | CI matrix 或 manual |
 | transparent privileged path | Linux IPv4/IPv6 transparent required/best-effort 行为。 | manual |
 
@@ -184,7 +184,7 @@ approved_at: 2026-05-30T00:00:00Z
 - 公开 TCP/UDP/QUIC 常规数据处理回调签名不得重新引入 worker id；`UdpServer::serve_socket` 和 `QuicServer::serve_socket` 回调必须继续携带 socket 所属 worker id。
 - `TcpServer`、`UdpServer`、`QuicServer` 不得重新引入 `serve_with_runtime`、无 runtime 参数 `serve` 或其他隐式默认 runtime 启动入口。
 - `TcpServer`、`UdpServer`、`QuicServer` 的 `serve` 必须继续返回各自 server 对象，且 `close` 只停止该 server 的后续 task。
-- `TcpServiceConfig::max_concurrency_per_worker` / `UdpServiceConfig::max_concurrency_per_worker` 必须保持默认不限制、显式 0 不限制、每 worker 独立计数；达到上限时等待许可释放，不主动丢弃连接或 packet，且不得变成跨 worker 全局共享池。
+- `TcpServiceConfig::max_concurrency_per_worker` / `UdpServiceConfig::max_concurrency_per_worker` 必须保持默认不限制、显式 0 不限制、每 worker 独立计数；native 路径达到上限时等待许可释放；用户态模拟 TCP/UDP/QUIC 路径达到目标 worker 上限时丢弃已收工作并继续 accept/recv；该限制不得变成跨 worker 全局共享池。
 - `UdpServer`、`QuicServer` 必须继续提供 `listener_socket`，优先当前监听线程 socket，否则从该 server 的监听 socket 集合中选择一个。
 - `BalancedUdpSocket` 不得重新出现在公开 API；UDP/QUIC handler、`listener_socket` 和 `serve_socket` 应继续接收或回调交付统一 `UdpSocket`，且 socket-only serve 回调应继续包含 worker id。
 - `quinn` feature 必须保持默认关闭；`UdpSocket` quinn helper 不得出现在默认 API 中，不得引入默认 quinn/quinn-udp 依赖，不得让本 crate 直接实现 quinn trait。
@@ -213,7 +213,7 @@ approved_at: 2026-05-30T00:00:00Z
 | FU-TEST-012 | testing | 删除 Dispatcher/DispatchPolicy 相关策略测试和 custom dispatcher 集成测试，新增内部 schedule 单元测试与公开 API 负例。 | Linux compatible scheduling | yes |
 | FU-TEST-013 | acceptance | tokio-uring runtime feature 实现后审计 feature 互斥、Linux cfg、公开 socket 类型和测试入口证据。 | tokio-uring runtime feature | yes |
 | FU-TEST-014 | acceptance | hyper 静态文件服务器示例实现后审计 proposal、design、示例代码、Cargo 依赖和 smoke 验证是否一致。 | hyper static example | yes |
-| FU-TEST-021 | acceptance | 并发限制实现后审计 proposal、design、代码、API 测试和 integration 测试是否一致，特别检查默认/0 不限流、每 worker permit、上限等待、许可释放和关闭唤醒边界。 | server handler concurrency limit | yes |
+| FU-TEST-021 | acceptance | 并发限制实现后审计 proposal、design、代码、API 测试和 integration 测试是否一致，特别检查默认/0 不限流、每 worker permit、native 上限等待、用户态模拟满载丢弃且不阻塞循环、许可释放和关闭唤醒边界。 | server handler concurrency limit | yes |
 
 ## 完成定义
 - [x] 测试文档覆盖所有直接子模块，或说明不存在直接子模块。

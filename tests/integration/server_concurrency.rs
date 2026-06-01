@@ -1,5 +1,5 @@
 use std::net::{TcpListener, UdpSocket as StdUdpSocket};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Once};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -9,6 +9,15 @@ use sfo_reuseport::{
     UdpServiceConfig,
 };
 use tokio::sync::Semaphore;
+
+static QUIC_FALLBACK_LOCK: Mutex<()> = Mutex::new(());
+static DISABLE_QUIC_BPF: Once = Once::new();
+
+fn disable_quic_bpf_for_test() {
+    DISABLE_QUIC_BPF.call_once(|| unsafe {
+        std::env::set_var("SFO_REUSEPORT_DISABLE_QUIC_BPF", "1");
+    });
+}
 
 fn free_tcp_addr() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -177,46 +186,6 @@ async fn udp_concurrency_limit_close_exits_waiting_listener() {
 }
 
 #[tokio::test]
-async fn quic_concurrency_limit_waits_for_per_worker_permit() {
-    let addr = free_udp_addr();
-    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
-    let entered = tracked_entries();
-    let release = Arc::new(Semaphore::new(0));
-
-    let server = QuicServer::serve(
-        &runtime,
-        UdpServiceConfig::new(addr).with_max_concurrency_per_worker(1),
-        {
-            let entered = entered.clone();
-            let release = Arc::clone(&release);
-            move |_socket, _meta, _payload| {
-                let entered = entered.clone();
-                let release = Arc::clone(&release);
-                async move {
-                    entered.enter();
-                    let permit = release.acquire().await.unwrap();
-                    drop(permit);
-                    entered.exit();
-                    Ok(())
-                }
-            }
-        },
-    )
-    .unwrap();
-
-    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    client.send_to(&quic_packet(b'a'), addr).await.unwrap();
-    entered.wait_for_total(1);
-    client.send_to(&quic_packet(b'b'), addr).await.unwrap();
-    entered.assert_no_new_entry();
-
-    release.add_permits(1);
-    entered.wait_for_total(2);
-    release.add_permits(1);
-    server.close().unwrap();
-}
-
-#[tokio::test]
 async fn quic_concurrency_limit_close_exits_waiting_listener() {
     let addr = free_udp_addr();
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
@@ -253,6 +222,64 @@ async fn quic_concurrency_limit_close_exits_waiting_listener() {
     server.close().unwrap();
     release.add_permits(1);
     entered.assert_no_new_entry();
+}
+
+#[tokio::test]
+async fn quic_simulated_concurrency_limit_drops_full_worker_without_blocking_recv() {
+    disable_quic_bpf_for_test();
+    let _guard = QUIC_FALLBACK_LOCK.lock().unwrap();
+    let addr = free_udp_addr();
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let entered = tracked_entries();
+    let release = Arc::new(Semaphore::new(0));
+    let (payload_sender, payload_receiver) = mpsc::channel();
+
+    let server = QuicServer::serve(
+        &runtime,
+        UdpServiceConfig::new(addr).with_max_concurrency_per_worker(1),
+        {
+            let entered = entered.clone();
+            let release = Arc::clone(&release);
+            move |_socket, _meta, payload| {
+                let entered = entered.clone();
+                let release = Arc::clone(&release);
+                let payload_sender = payload_sender.clone();
+                async move {
+                    entered.enter();
+                    payload_sender.send(*payload.last().unwrap()).unwrap();
+                    let permit = release.acquire().await.unwrap();
+                    drop(permit);
+                    entered.exit();
+                    Ok(())
+                }
+            }
+        },
+    )
+    .unwrap();
+
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.send_to(&quic_packet(b'a'), addr).await.unwrap();
+    entered.wait_for_total(1);
+    assert_eq!(
+        payload_receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+        b'a'
+    );
+
+    client.send_to(&quic_packet(b'b'), addr).await.unwrap();
+    entered.assert_no_new_entry();
+
+    release.add_permits(1);
+    entered.assert_no_new_entry();
+
+    client.send_to(&quic_packet(b'c'), addr).await.unwrap();
+    entered.wait_for_total(2);
+    assert_eq!(
+        payload_receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+        b'c'
+    );
+
+    release.add_permits(1);
+    server.close().unwrap();
 }
 
 fn quic_packet(last: u8) -> [u8; 12] {

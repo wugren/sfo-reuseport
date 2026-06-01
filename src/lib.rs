@@ -35,4 +35,4 @@ pub use crate::core::{
     UdpServiceConfig, UdpSocket, WorkerCount, DEFAULT_ROUTED_PACKET_CHANNEL_CAPACITY,
 };
 #[cfg(not(all(feature = "runtime-tokio-uring", not(target_os = "linux"))))]
-pub use crate::runtime::{spawn, TaskHandle, TcpStream};
+pub use crate::runtime::{spawn_local, TaskHandle, TcpStream};

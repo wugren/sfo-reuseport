@@ -216,10 +216,10 @@ async fn simulated_tcp_accept_loop(
         let Some(limit) = limits.get(worker_id) else {
             break;
         };
-        let permit = limit.acquire().await;
-        if !is_active(&runtime_active) {
-            break;
-        }
+        let Some(permit) = limit.try_acquire() else {
+            drop(stream);
+            continue;
+        };
         let handler = Arc::clone(&handler);
         #[cfg(feature = "runtime-tokio-uring")]
         let submit_result: Result<(), Error> = {
@@ -254,7 +254,7 @@ fn spawn_tcp_handler(
     handler: TcpHandler,
     permit: ConcurrencyPermit,
 ) -> Result<(), Error> {
-    runtime::spawn(async move {
+    runtime::spawn_local(async move {
         let _permit = permit;
         let _ = handler(stream).await;
     })

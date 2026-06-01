@@ -1,6 +1,6 @@
 [package]
 name = "sfo-reuseport"
-version = "0.1.5"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Multi-worker TCP and UDP services with reuse-port style socket distribution"
@@ -23,12 +23,13 @@ include = [
 default = ["runtime-tokio"]
 quinn = []
 runtime-tokio = ["dep:tokio", "tokio/sync"]
-runtime-async-std = ["dep:async-executor", "dep:async-std"]
+runtime-async-std = ["dep:async-executor", "dep:async-std", "async-std/unstable"]
 runtime-tokio-uring = ["dep:tokio", "dep:tokio-uring", "tokio/sync", "tokio/time"]
 
 [dependencies]
 async-executor = { version = "1.14", optional = true }
 async-std = { version = "1.13", optional = true, features = ["attributes"] }
+atomic-waker = "1.1"
 getrandom = "0.3"
 num_cpus = "1.17"
 socket2 = { version = "0.6", features = ["all"] }

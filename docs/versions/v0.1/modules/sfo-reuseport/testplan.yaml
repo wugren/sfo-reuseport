@@ -83,7 +83,7 @@ levels:
         change_ids: ["CHG-socket-init-callback"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: server-concurrency-limit-api
-        name: TcpServiceConfig/UdpServiceConfig 每 worker handler 并发上限 API 契约
+        name: TcpServiceConfig/UdpServiceConfig 每 worker handler 并发上限 API 契约和 permit helper 去锁审查
         change_ids: ["CHG-server-concurrency-limit"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: routed-packet-channel-limit-api
@@ -222,7 +222,7 @@ levels:
         change_ids: ["CHG-quic-routed-udp", "CHG-platform-behavior", "CHG-udp-runtime-socket", "CHG-worker-model", "CHG-worker-thread-runtime"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: server-concurrency-limit
-        name: TCP UDP QUIC 每 worker handler 并发上限、等待和释放
+        name: TCP UDP QUIC 每 worker handler 并发上限、native 等待、模拟路径满载丢弃、释放和 permit helper 单 waiter 模型
         change_ids: ["CHG-server-concurrency-limit", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp", "CHG-worker-thread-runtime"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: platform-os-matrix
