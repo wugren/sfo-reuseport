@@ -2,7 +2,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-use crate::core::{Error, ServiceConfig, TransparentMode};
+use crate::core::{Error, SocketConfig, TransparentMode, UdpServiceConfig};
 
 pub(crate) fn set_reuse_port(socket: &socket2::Socket) -> Result<(), Error> {
     super::unix::set_reuse_port(socket)
@@ -10,18 +10,18 @@ pub(crate) fn set_reuse_port(socket: &socket2::Socket) -> Result<(), Error> {
 
 pub(crate) fn apply_transparent(
     socket: &socket2::Socket,
-    config: &ServiceConfig,
+    config: &impl SocketConfig,
 ) -> Result<(), Error> {
     apply_ipv4_transparent(socket, config)?;
     apply_ipv6_transparent(socket, config)?;
     Ok(())
 }
 
-fn apply_ipv4_transparent(socket: &socket2::Socket, config: &ServiceConfig) -> Result<(), Error> {
-    match config.socket_options.ipv4_transparent {
+fn apply_ipv4_transparent(socket: &socket2::Socket, config: &impl SocketConfig) -> Result<(), Error> {
+    match config.socket_options().ipv4_transparent {
         TransparentMode::Disabled => Ok(()),
-        TransparentMode::BestEffort if !config.bind_addr.is_ipv4() => Ok(()),
-        TransparentMode::Required if !config.bind_addr.is_ipv4() => Err(
+        TransparentMode::BestEffort if !config.bind_addr().is_ipv4() => Ok(()),
+        TransparentMode::Required if !config.bind_addr().is_ipv4() => Err(
             Error::UnsupportedPlatformOption(
                 "ipv4 transparent requires an IPv4 bind address".to_string(),
             ),
@@ -34,11 +34,11 @@ fn apply_ipv4_transparent(socket: &socket2::Socket, config: &ServiceConfig) -> R
     }
 }
 
-fn apply_ipv6_transparent(socket: &socket2::Socket, config: &ServiceConfig) -> Result<(), Error> {
-    match config.socket_options.ipv6_transparent {
+fn apply_ipv6_transparent(socket: &socket2::Socket, config: &impl SocketConfig) -> Result<(), Error> {
+    match config.socket_options().ipv6_transparent {
         TransparentMode::Disabled => Ok(()),
-        TransparentMode::BestEffort if !config.bind_addr.is_ipv6() => Ok(()),
-        TransparentMode::Required if !config.bind_addr.is_ipv6() => Err(
+        TransparentMode::BestEffort if !config.bind_addr().is_ipv6() => Ok(()),
+        TransparentMode::Required if !config.bind_addr().is_ipv6() => Err(
             Error::UnsupportedPlatformOption(
                 "ipv6 transparent requires an IPv6 bind address".to_string(),
             ),
@@ -53,7 +53,7 @@ fn apply_ipv6_transparent(socket: &socket2::Socket, config: &ServiceConfig) -> R
 
 #[cfg(target_os = "linux")]
 pub(crate) fn bind_quic_udp_reuseport_workers(
-    config: &ServiceConfig,
+    config: &UdpServiceConfig,
     workers: usize,
 ) -> Result<Option<Vec<UdpSocket>>, Error> {
     if std::env::var_os("SFO_REUSEPORT_DISABLE_QUIC_BPF").is_some() {
@@ -96,7 +96,7 @@ pub(crate) fn bind_quic_udp_reuseport_workers(
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn bind_quic_udp_reuseport_workers(
-    _config: &ServiceConfig,
+    _config: &UdpServiceConfig,
     _workers: usize,
 ) -> Result<Option<Vec<UdpSocket>>, Error> {
     Ok(None)

@@ -2,7 +2,7 @@ use std::env;
 use std::net::SocketAddr;
 
 use sfo_reuseport::{
-    Error, ServerRuntime, ServerRuntimeConfig, ServiceConfig, UdpServer, UdpSocket,
+    Error, ServerRuntime, ServerRuntimeConfig, UdpServiceConfig, UdpServer, UdpSocket,
 };
 
 #[cfg(feature = "runtime-tokio")]
@@ -25,7 +25,7 @@ fn main() -> Result<(), Error> {
 async fn run() -> Result<(), Error> {
     let args = Args::parse()?;
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(args.workers))?;
-    let config = ServiceConfig::new(args.addr);
+    let config = UdpServiceConfig::new(args.addr);
 
     eprintln!(
         "udp serve_socket echo server listening on {} with {} worker(s)",

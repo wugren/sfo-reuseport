@@ -1,6 +1,6 @@
 use std::net::{TcpListener, UdpSocket};
 
-use crate::core::{Error, ServiceConfig};
+use crate::core::{Error, SocketConfig, TcpServiceConfig, UdpServiceConfig};
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 mod bsd;
@@ -18,9 +18,9 @@ use bsd as imp;
 #[cfg(windows)]
 use windows as imp;
 
-pub(crate) fn bind_tcp(config: &ServiceConfig) -> Result<TcpListener, Error> {
+pub(crate) fn bind_tcp(config: &TcpServiceConfig) -> Result<TcpListener, Error> {
     let socket = socket2::Socket::new(
-        socket2::Domain::for_address(config.bind_addr),
+        socket2::Domain::for_address(config.bind_addr()),
         socket2::Type::STREAM,
         Some(socket2::Protocol::TCP),
     )
@@ -28,7 +28,7 @@ pub(crate) fn bind_tcp(config: &ServiceConfig) -> Result<TcpListener, Error> {
     apply_socket_init_callback(&socket, config)?;
     apply_common_options(&socket, config)?;
     socket
-        .bind(&config.bind_addr.into())
+        .bind(&config.bind_addr().into())
         .map_err(Error::from)?;
     socket.listen(1024).map_err(Error::from)?;
     let listener: TcpListener = socket.into();
@@ -36,7 +36,7 @@ pub(crate) fn bind_tcp(config: &ServiceConfig) -> Result<TcpListener, Error> {
 }
 
 pub(crate) fn bind_tcp_workers(
-    config: &ServiceConfig,
+    config: &TcpServiceConfig,
     workers: usize,
 ) -> Result<Vec<TcpListener>, Error> {
     if supports_reuse_port_balancing() {
@@ -46,9 +46,9 @@ pub(crate) fn bind_tcp_workers(
     }
 }
 
-pub(crate) fn bind_udp(config: &ServiceConfig) -> Result<UdpSocket, Error> {
+pub(crate) fn bind_udp(config: &UdpServiceConfig) -> Result<UdpSocket, Error> {
     let socket = socket2::Socket::new(
-        socket2::Domain::for_address(config.bind_addr),
+        socket2::Domain::for_address(config.bind_addr()),
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
     )
@@ -56,14 +56,14 @@ pub(crate) fn bind_udp(config: &ServiceConfig) -> Result<UdpSocket, Error> {
     apply_socket_init_callback(&socket, config)?;
     apply_common_options(&socket, config)?;
     socket
-        .bind(&config.bind_addr.into())
+        .bind(&config.bind_addr().into())
         .map_err(Error::from)?;
     let socket: UdpSocket = socket.into();
     Ok(socket)
 }
 
 pub(crate) fn bind_udp_workers(
-    config: &ServiceConfig,
+    config: &UdpServiceConfig,
     workers: usize,
 ) -> Result<Vec<UdpSocket>, Error> {
     if supports_reuse_port_balancing() {
@@ -74,7 +74,7 @@ pub(crate) fn bind_udp_workers(
 }
 
 pub(crate) fn bind_quic_udp_reuseport_workers(
-    config: &ServiceConfig,
+    config: &UdpServiceConfig,
     workers: usize,
 ) -> Result<Option<Vec<UdpSocket>>, Error> {
     imp::bind_quic_udp_reuseport_workers(config, workers)
@@ -88,9 +88,9 @@ pub fn supports_reuse_port_balancing() -> bool {
     imp::supports_reuse_port_balancing()
 }
 
-fn apply_common_options(socket: &socket2::Socket, config: &ServiceConfig) -> Result<(), Error> {
+fn apply_common_options<C: SocketConfig>(socket: &socket2::Socket, config: &C) -> Result<(), Error> {
     socket
-        .set_reuse_address(config.socket_options.reuse_address)
+        .set_reuse_address(config.socket_options().reuse_address)
         .map_err(Error::from)?;
     imp::set_reuse_port(socket)?;
 
@@ -99,11 +99,11 @@ fn apply_common_options(socket: &socket2::Socket, config: &ServiceConfig) -> Res
     Ok(())
 }
 
-fn apply_socket_init_callback(
+fn apply_socket_init_callback<C: SocketConfig>(
     socket: &socket2::Socket,
-    config: &ServiceConfig,
+    config: &C,
 ) -> Result<(), Error> {
-    if let Some(callback) = &config.socket_init_callback {
+    if let Some(callback) = config.socket_init_callback() {
         callback(socket).map_err(|error| Error::SocketInitCallback(error.to_string()))?;
     }
     Ok(())

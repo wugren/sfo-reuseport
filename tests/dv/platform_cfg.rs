@@ -1,8 +1,8 @@
-use sfo_reuseport::{ServiceConfig, SocketOptions};
+use sfo_reuseport::{UdpServiceConfig, SocketOptions};
 
 #[test]
 fn current_platform_can_construct_default_config() {
-    let config = ServiceConfig::new("127.0.0.1:0".parse().unwrap())
+    let config = UdpServiceConfig::new("127.0.0.1:0".parse().unwrap())
         .with_socket_options(SocketOptions::default());
     assert!(config.socket_options.reuse_address);
 }

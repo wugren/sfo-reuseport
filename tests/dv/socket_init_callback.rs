@@ -1,13 +1,16 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer, UdpServer};
+use sfo_reuseport::{
+    Error, ServerRuntime, ServerRuntimeConfig, TcpServer, TcpServiceConfig, UdpServer,
+    UdpServiceConfig,
+};
 
 #[tokio::test]
 async fn tcp_bind_invokes_socket_init_callback_and_propagates_error() {
     let calls = Arc::new(AtomicUsize::new(0));
     let callback_calls = calls.clone();
-    let config = ServiceConfig::new("127.0.0.1:0".parse().unwrap()).with_socket_init_callback(
+    let config = TcpServiceConfig::new("127.0.0.1:0".parse().unwrap()).with_socket_init_callback(
         move |_socket| {
             callback_calls.fetch_add(1, Ordering::SeqCst);
             Err(Error::InvalidConfig("tcp callback failure".to_string()))
@@ -33,7 +36,7 @@ async fn tcp_bind_invokes_socket_init_callback_and_propagates_error() {
 async fn udp_bind_invokes_socket_init_callback_and_propagates_error() {
     let calls = Arc::new(AtomicUsize::new(0));
     let callback_calls = calls.clone();
-    let config = ServiceConfig::new("127.0.0.1:0".parse().unwrap()).with_socket_init_callback(
+    let config = UdpServiceConfig::new("127.0.0.1:0".parse().unwrap()).with_socket_init_callback(
         move |_socket| {
             callback_calls.fetch_add(1, Ordering::SeqCst);
             Err(Error::InvalidConfig("udp callback failure".to_string()))

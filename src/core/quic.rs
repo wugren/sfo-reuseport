@@ -5,7 +5,7 @@ use crate::core::udp::{
     PacketMeta, UdpHandler, UdpServerState, UdpSocket, add_socket_callback_simulated_listener,
     is_active, socket_callback, spawn_udp_handler, submit_udp_handler, udp_handler,
 };
-use crate::core::{Error, HandlerFuture, ServerRuntime, ServiceConfig, WorkerConcurrencyLimit};
+use crate::core::{Error, HandlerFuture, ServerRuntime, UdpServiceConfig, WorkerConcurrencyLimit};
 use crate::platform;
 use crate::runtime;
 
@@ -17,7 +17,7 @@ pub struct QuicServer {
 impl QuicServer {
     pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
-        config: ServiceConfig,
+        config: UdpServiceConfig,
         handler: F,
     ) -> Result<Self, Error>
     where
@@ -25,6 +25,7 @@ impl QuicServer {
         Fut: HandlerFuture,
     {
         config.validate()?;
+        config.validate_routed_packet_channel_capacity()?;
         let server = Self {
             state: Arc::new(UdpServerState::new()),
         };
@@ -43,7 +44,7 @@ impl QuicServer {
 
     pub fn serve_socket<F, Fut>(
         runtime: &ServerRuntime,
-        config: ServiceConfig,
+        config: UdpServiceConfig,
         callback: F,
     ) -> Result<Self, Error>
     where
@@ -51,6 +52,7 @@ impl QuicServer {
         Fut: HandlerFuture,
     {
         config.validate()?;
+        config.validate_routed_packet_channel_capacity()?;
         let server = Self {
             state: Arc::new(UdpServerState::new()),
         };
@@ -61,7 +63,7 @@ impl QuicServer {
 
 fn add_quic_socket_callback_listener<F, Fut>(
     runtime: &ServerRuntime,
-    service_config: ServiceConfig,
+    service_config: UdpServiceConfig,
     callback: F,
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
@@ -91,7 +93,7 @@ where
 
 fn add_quic_socket_callback_reuseport_bpf_listener<F, Fut>(
     runtime: &ServerRuntime,
-    service_config: &ServiceConfig,
+    service_config: &UdpServiceConfig,
     callback: F,
     state: Arc<UdpServerState>,
 ) -> Result<bool, Error>
@@ -126,7 +128,7 @@ where
             };
             let _ = callback(socket, worker_id).await;
         })?;
-        state.register_task(task)?;
+        state.register_callback_task(task)?;
     }
 
     Ok(true)
@@ -134,7 +136,7 @@ where
 
 fn add_quic_routed_listener<F, Fut>(
     runtime: &ServerRuntime,
-    service_config: ServiceConfig,
+    service_config: UdpServiceConfig,
     handler: F,
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
@@ -151,7 +153,7 @@ where
 
 fn add_quic_reuseport_listener<F, Fut>(
     runtime: &ServerRuntime,
-    service_config: ServiceConfig,
+    service_config: UdpServiceConfig,
     handler: F,
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
@@ -173,7 +175,7 @@ where
 
 fn add_quic_simulated_listener<F, Fut>(
     runtime: &ServerRuntime,
-    service_config: ServiceConfig,
+    service_config: UdpServiceConfig,
     handler: F,
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
@@ -224,7 +226,7 @@ where
 
 fn add_quic_reuseport_bpf_listener<F, Fut>(
     runtime: &ServerRuntime,
-    service_config: &ServiceConfig,
+    service_config: &UdpServiceConfig,
     handler: F,
     state: Arc<UdpServerState>,
 ) -> Result<bool, Error>

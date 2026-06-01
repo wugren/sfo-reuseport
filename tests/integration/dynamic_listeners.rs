@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use sfo_reuseport::{
-    QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer, UdpServer, UdpSocket,
+    QuicServer, ServerRuntime, ServerRuntimeConfig, TcpServer, TcpServiceConfig, UdpServer,
+    UdpServiceConfig, UdpSocket,
 };
 
 fn free_tcp_addr() -> std::net::SocketAddr {
@@ -54,7 +55,7 @@ async fn tcp_server_serve_registers_listener_on_runtime() {
     let tcp_seen = Arc::clone(&seen);
     let server = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
 
-    TcpServer::serve(&server, ServiceConfig::new(addr), move |_stream| {
+    TcpServer::serve(&server, TcpServiceConfig::new(addr), move |_stream| {
         let tcp_seen = Arc::clone(&tcp_seen);
         async move {
             tcp_seen.fetch_add(1, Ordering::SeqCst);
@@ -81,7 +82,7 @@ async fn tcp_server_close_allows_reopening_same_addr() {
     let seen = Arc::new(AtomicUsize::new(0));
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
 
-    let tcp = TcpServer::serve(&runtime, ServiceConfig::new(addr), |_stream| async { Ok(()) })
+    let tcp = TcpServer::serve(&runtime, TcpServiceConfig::new(addr), |_stream| async { Ok(()) })
         .unwrap();
 
     tcp.close().unwrap();
@@ -91,7 +92,7 @@ async fn tcp_server_close_allows_reopening_same_addr() {
         let mut reopened = None;
         for _ in 0..50 {
             let tcp_seen = Arc::clone(&seen);
-            match TcpServer::serve(&runtime, ServiceConfig::new(addr), move |_stream| {
+            match TcpServer::serve(&runtime, TcpServiceConfig::new(addr), move |_stream| {
                 let tcp_seen = Arc::clone(&tcp_seen);
                 async move {
                     tcp_seen.fetch_add(1, Ordering::SeqCst);
@@ -131,7 +132,7 @@ async fn udp_server_serve_registers_listener_on_runtime() {
 
     UdpServer::serve(
         &server,
-        ServiceConfig::new(addr),
+        UdpServiceConfig::new(addr),
         move |_socket, _meta, _payload| {
             let udp_seen = Arc::clone(&udp_seen);
             async move {
@@ -162,7 +163,7 @@ async fn udp_server_listener_socket_is_available_and_close_stops_new_work() {
 
     let udp = UdpServer::serve(
         &runtime,
-        ServiceConfig::new(addr),
+        UdpServiceConfig::new(addr),
         move |_socket, _meta, _payload| {
             let udp_seen = Arc::clone(&udp_seen);
             async move {
@@ -193,7 +194,7 @@ async fn quic_server_listener_socket_is_available() {
 
     let quic = QuicServer::serve(
         &runtime,
-        ServiceConfig::new(addr),
+        UdpServiceConfig::new(addr),
         |_socket, _meta, _payload| async { Ok(()) },
     )
     .unwrap();
@@ -218,7 +219,7 @@ async fn one_server_runtime_handles_tcp_and_udp_serve_listeners() {
 
     TcpServer::serve(
         &server,
-        ServiceConfig::new(tcp_addr),
+        TcpServiceConfig::new(tcp_addr),
         move |_stream| {
             let tcp_handler_seen = Arc::clone(&tcp_handler_seen);
             async move {
@@ -230,7 +231,7 @@ async fn one_server_runtime_handles_tcp_and_udp_serve_listeners() {
     .unwrap();
     UdpServer::serve(
         &server,
-        ServiceConfig::new(udp_addr),
+        UdpServiceConfig::new(udp_addr),
         move |_socket, _meta, _payload| {
             let udp_handler_seen = Arc::clone(&udp_handler_seen);
             async move {

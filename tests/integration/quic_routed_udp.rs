@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use sfo_reuseport::{
-    Error, QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig,
+    Error, QuicServer, ServerRuntime, ServerRuntimeConfig, UdpServiceConfig,
 };
 #[cfg(feature = "quinn")]
 use sfo_reuseport::QuicCidGenerator;
@@ -41,7 +41,7 @@ async fn quic_server_serve_delivers_long_header_dcid_and_sends_response() {
         let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(3))?;
         QuicServer::serve(
             &runtime,
-            ServiceConfig::new(addr),
+            UdpServiceConfig::new(addr),
             |socket, meta, payload| async move {
                 assert_eq!(payload, [0xe0, 0, 0, 0, 1, 4, 0, 2, 9, 9]);
                 socket.send_to(b"quic-ok", meta.peer_addr.unwrap()).await?;
@@ -77,7 +77,7 @@ async fn quic_routed_udp_delivers_long_header_dcid_to_target_worker() {
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(3)).unwrap();
     let server = QuicServer::serve(
         &runtime,
-        ServiceConfig::new(addr),
+        UdpServiceConfig::new(addr),
         move |socket, meta, _payload| {
             let handler_seen_worker = Arc::clone(&handler_seen_worker);
             async move {
@@ -125,7 +125,7 @@ async fn quic_routed_udp_initial_prefix_matches_followup_prefix() {
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(3)).unwrap();
     let server = QuicServer::serve(
         &runtime,
-        ServiceConfig::new(addr),
+        UdpServiceConfig::new(addr),
         move |socket, meta, _payload| {
             let handler_seen_workers = Arc::clone(&handler_seen_workers);
             async move {
@@ -198,7 +198,7 @@ async fn quic_routed_udp_drops_invalid_route_key() {
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(2)).unwrap();
     let server = QuicServer::serve(
         &runtime,
-        ServiceConfig::new(addr),
+        UdpServiceConfig::new(addr),
         |_socket, _meta, _payload| async {
             panic!("invalid QUIC route key should not reach handler");
         },
@@ -221,7 +221,7 @@ async fn quic_routed_udp_supports_full_16_bit_worker_index_prefix() {
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(4)).unwrap();
     let server = QuicServer::serve(
         &runtime,
-        ServiceConfig::new(addr),
+        UdpServiceConfig::new(addr),
         move |socket, meta, _payload| {
             let handler_seen_worker = Arc::clone(&handler_seen_worker);
             async move {
@@ -644,7 +644,7 @@ async fn quic_endpoint_servers_connect_to_each_other_and_exchange_data() {
     let server_a_served = served_tx.clone();
     let server_a = QuicServer::serve_socket(
         &runtime,
-        ServiceConfig::new(addr_a),
+        UdpServiceConfig::new(addr_a),
         move |socket, worker_id| {
             run_quinn_worker_endpoint(
                 0,
@@ -665,7 +665,7 @@ async fn quic_endpoint_servers_connect_to_each_other_and_exchange_data() {
     let server_b_served = served_tx;
     let server_b = QuicServer::serve_socket(
         &runtime,
-        ServiceConfig::new(addr_b),
+        UdpServiceConfig::new(addr_b),
         move |socket, worker_id| {
             run_quinn_worker_endpoint(
                 1,

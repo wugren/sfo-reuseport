@@ -1,10 +1,10 @@
 use sfo_reuseport::{
-    ServerRuntime, ServerRuntimeConfig, ServiceConfig, SocketOptions, TransparentMode, UdpServer,
+    ServerRuntime, ServerRuntimeConfig, UdpServiceConfig, SocketOptions, TransparentMode, UdpServer,
 };
 
 #[tokio::test]
 async fn required_transparent_returns_explicit_error() {
-    let config = ServiceConfig::new("127.0.0.1:0".parse().unwrap()).with_socket_options(
+    let config = UdpServiceConfig::new("127.0.0.1:0".parse().unwrap()).with_socket_options(
         SocketOptions {
             reuse_address: true,
             ipv4_transparent: TransparentMode::Required,
@@ -23,7 +23,7 @@ async fn required_transparent_returns_explicit_error() {
 
 #[tokio::test]
 async fn required_ipv6_transparent_returns_explicit_error() {
-    let config = ServiceConfig::new("[::1]:0".parse().unwrap()).with_socket_options(
+    let config = UdpServiceConfig::new("[::1]:0".parse().unwrap()).with_socket_options(
         SocketOptions {
             reuse_address: true,
             ipv4_transparent: TransparentMode::Disabled,

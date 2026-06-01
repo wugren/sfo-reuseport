@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use sfo_reuseport::{
     Error, PacketMeta, QuicCidGenerator, QuicServer, ServerRuntime, ServerRuntimeConfig,
-    ServiceConfig, TcpServer, TcpStream, UdpServer, UdpSocket,
+    TcpServer, TcpServiceConfig, TcpStream, UdpServer, UdpServiceConfig, UdpSocket,
 };
+#[cfg(windows)]
+use sfo_reuseport::DEFAULT_ROUTED_PACKET_CHANNEL_CAPACITY;
 
 fn assert_tcp_handler<F, Fut>(_handler: F)
 where
@@ -41,22 +43,24 @@ fn socket_only_callback_signatures_include_worker_id() {
 
 #[test]
 fn server_entrypoints_are_public() {
-    let config = ServiceConfig::new("127.0.0.1:0".parse().unwrap());
+    let tcp_config = TcpServiceConfig::new("127.0.0.1:0".parse().unwrap());
+    let udp_config = UdpServiceConfig::new("127.0.0.1:0".parse().unwrap());
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
-    let tcp: Result<TcpServer, Error> = TcpServer::serve(&runtime, config.clone(), |_stream| async {
-        Ok(())
-    });
+    let tcp: Result<TcpServer, Error> =
+        TcpServer::serve(&runtime, tcp_config, |_stream| async { Ok(()) });
     let udp: Result<UdpServer, Error> =
-        UdpServer::serve(&runtime, config.clone(), |_socket, _meta, _payload| async {
+        UdpServer::serve(&runtime, udp_config.clone(), |_socket, _meta, _payload| async {
             Ok(())
         });
     let quic: Result<QuicServer, Error> =
-        QuicServer::serve(&runtime, config, |_socket, _meta, _payload| async { Ok(()) });
+        QuicServer::serve(&runtime, udp_config, |_socket, _meta, _payload| async {
+            Ok(())
+        });
     let (udp_tx, udp_rx) = mpsc::channel();
     let (quic_tx, quic_rx) = mpsc::channel();
     let udp_socket: Result<UdpServer, Error> = UdpServer::serve_socket(
         &runtime,
-        ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        UdpServiceConfig::new("127.0.0.1:0".parse().unwrap()),
         move |socket, worker_id| {
             let udp_tx = udp_tx.clone();
             async move {
@@ -67,7 +71,7 @@ fn server_entrypoints_are_public() {
     );
     let quic_socket: Result<QuicServer, Error> = QuicServer::serve_socket(
         &runtime,
-        ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        UdpServiceConfig::new("127.0.0.1:0".parse().unwrap()),
         move |socket, worker_id| {
             let quic_tx = quic_tx.clone();
             async move {
@@ -92,19 +96,97 @@ fn server_entrypoints_are_public() {
 fn service_config_exposes_per_worker_concurrency_limit() {
     let addr = "127.0.0.1:0".parse().unwrap();
 
-    assert_eq!(ServiceConfig::new(addr).max_concurrency_per_worker(), None);
+    assert_eq!(TcpServiceConfig::new(addr).max_concurrency_per_worker(), None);
+    assert_eq!(UdpServiceConfig::new(addr).max_concurrency_per_worker(), None);
     assert_eq!(
-        ServiceConfig::new(addr)
+        TcpServiceConfig::new(addr)
+            .with_max_concurrency_per_worker(2)
+            .max_concurrency_per_worker(),
+        Some(2)
+    );
+    assert_eq!(
+        UdpServiceConfig::new(addr)
             .with_max_concurrency_per_worker(0)
             .max_concurrency_per_worker(),
         Some(0)
     );
     assert_eq!(
-        ServiceConfig::new(addr)
+        UdpServiceConfig::new(addr)
             .with_max_concurrency_per_worker(2)
             .max_concurrency_per_worker(),
         Some(2)
     );
+}
+
+#[test]
+#[cfg(windows)]
+fn service_config_exposes_routed_packet_channel_capacity() {
+    let addr = "127.0.0.1:0".parse().unwrap();
+
+    assert_eq!(
+        UdpServiceConfig::new(addr).routed_packet_channel_capacity(),
+        DEFAULT_ROUTED_PACKET_CHANNEL_CAPACITY
+    );
+    assert_eq!(
+        UdpServiceConfig::new(addr)
+            .with_routed_packet_channel_capacity(128)
+            .routed_packet_channel_capacity(),
+        128
+    );
+
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let result = UdpServer::serve(
+        &runtime,
+        UdpServiceConfig::new(addr).with_routed_packet_channel_capacity(0),
+        |_socket, _meta, _payload| async { Ok(()) },
+    );
+    assert!(matches!(result, Err(Error::InvalidConfig(_))));
+
+    let result = QuicServer::serve(
+        &runtime,
+        UdpServiceConfig::new(addr).with_routed_packet_channel_capacity(0),
+        |_socket, _meta, _payload| async { Ok(()) },
+    );
+    assert!(matches!(result, Err(Error::InvalidConfig(_))));
+
+    let tcp = TcpServer::serve(
+        &runtime,
+        TcpServiceConfig::new(addr),
+        |_stream| async { Ok(()) },
+    );
+    assert!(tcp.is_ok());
+    tcp.unwrap().close().unwrap();
+}
+
+#[test]
+#[cfg(not(windows))]
+fn routed_packet_channel_capacity_api_is_windows_only() {
+    let config = include_str!("../../src/core/config.rs");
+    let capacity_setter = config
+        .find("pub fn with_routed_packet_channel_capacity")
+        .unwrap();
+    let capacity_getter = config.find("pub fn routed_packet_channel_capacity").unwrap();
+    assert!(config[..capacity_setter].contains("#[cfg(windows)]"));
+    assert!(config[capacity_setter..capacity_getter].contains("#[cfg(windows)]"));
+}
+
+#[test]
+fn service_config_types_are_split_by_protocol_family() {
+    let config = include_str!("../../src/core/config.rs");
+    let lib = include_str!("../../src/lib.rs");
+
+    assert!(config.contains("pub struct TcpServiceConfig"));
+    assert!(config.contains("pub struct UdpServiceConfig"));
+    assert!(!config.contains("pub struct ServiceConfig"));
+    assert!(
+        !lib.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .any(|token| token == "ServiceConfig")
+    );
+
+    let tcp_start = config.find("pub struct TcpServiceConfig").unwrap();
+    let udp_start = config.find("pub struct UdpServiceConfig").unwrap();
+    let tcp_section = &config[tcp_start..udp_start];
+    assert!(!tcp_section.contains("routed_packet_channel_capacity"));
 }
 
 #[test]

@@ -2,7 +2,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer};
+use sfo_reuseport::{ServerRuntime, ServerRuntimeConfig, TcpServiceConfig, TcpServer};
 
 #[test]
 fn worker_runtime_runs_listener_handler_on_named_worker_thread() {
@@ -11,7 +11,7 @@ fn worker_runtime_runs_listener_handler_on_named_worker_thread() {
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
     TcpServer::serve(
         &runtime,
-        ServiceConfig::new(addr),
+        TcpServiceConfig::new(addr),
         move |_stream| {
             let sender = sender.clone();
             async move {

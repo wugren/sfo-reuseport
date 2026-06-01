@@ -1,6 +1,6 @@
 use sfo_reuseport::{
-    QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer, UdpServer,
-    WorkerCount,
+    QuicServer, ServerRuntime, ServerRuntimeConfig, TcpServer, TcpServiceConfig, UdpServer,
+    UdpServiceConfig, WorkerCount,
 };
 
 #[test]
@@ -12,7 +12,7 @@ fn server_runtime_config_can_set_worker_count() {
 #[test]
 fn service_config_records_bind_addr_without_worker_count() {
     let addr = "127.0.0.1:0".parse().unwrap();
-    let config = ServiceConfig::new(addr);
+    let config = UdpServiceConfig::new(addr);
     assert_eq!(config.bind_addr, addr);
 }
 
@@ -34,19 +34,19 @@ fn servers_return_handles_when_attached_to_server_runtime_through_serve() {
 
     let tcp = TcpServer::serve(
         &runtime,
-        ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        TcpServiceConfig::new("127.0.0.1:0".parse().unwrap()),
         |_stream| async { Ok(()) },
     )
     .unwrap();
     let udp = UdpServer::serve(
         &runtime,
-        ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        UdpServiceConfig::new("127.0.0.1:0".parse().unwrap()),
         |_socket, _meta, _payload| async { Ok(()) },
     )
     .unwrap();
     let quic = QuicServer::serve(
         &runtime,
-        ServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        UdpServiceConfig::new("127.0.0.1:0".parse().unwrap()),
         |_socket, _meta, _payload| async { Ok(()) },
     )
     .unwrap();

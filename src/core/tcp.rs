@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use crate::core::{
     ConcurrencyPermit, Error, HandlerFuture, HandlerFutureBox, PacketMeta, ServerRuntime,
-    ServiceConfig, WorkerConcurrencyLimit, linux_reuseport_select,
+    TcpServiceConfig, WorkerConcurrencyLimit, linux_reuseport_select,
 };
 use crate::platform;
 use crate::runtime::{self, TcpStream};
@@ -23,7 +23,7 @@ struct TcpServerState {
 impl TcpServer {
     pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
-        config: ServiceConfig,
+        config: TcpServiceConfig,
         handler: F,
     ) -> Result<Self, Error>
     where
@@ -74,7 +74,7 @@ impl TcpServerState {
 
 fn add_reuse_port_listener<F, Fut>(
     runtime: &ServerRuntime,
-    service_config: ServiceConfig,
+    service_config: TcpServiceConfig,
     handler: F,
     state: Arc<TcpServerState>,
 ) -> Result<(), Error>
@@ -111,7 +111,7 @@ where
 
 fn add_simulated_listener<F, Fut>(
     runtime: &ServerRuntime,
-    service_config: ServiceConfig,
+    service_config: TcpServiceConfig,
     handler: F,
     state: Arc<TcpServerState>,
 ) -> Result<(), Error>

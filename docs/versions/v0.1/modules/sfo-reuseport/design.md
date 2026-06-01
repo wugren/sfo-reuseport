@@ -3,8 +3,8 @@ module: sfo-reuseport
 submodule:
 version: v0.1
 status: approved
-approved_by: auto-pipeline
-approved_at: 2026-05-30
+approved_by: user-request
+approved_at: 2026-06-01
 ---
 
 # sfo-reuseport 设计
@@ -20,12 +20,14 @@ approved_at: 2026-05-30
   - 领域实现抽象层，包含共用业务逻辑以及平台实现接口。
   - 平台具体实现，封装 Linux、macOS、FreeBSD 和 Windows socket 行为差异。
 - 定义 worker 生命周期、worker thread runtime、TCP accept、UDP packet 交付、Linux 兼容内部调度、受控 socket 选项和错误语义。
-- 定义 `ServiceConfig` 的 socket 创建后初始化回调；该回调默认不存在，在底层 socket 创建后、内部 socket 选项和 bind/listen 前同步执行。
-- 定义 `ServiceConfig::max_concurrency_per_worker`；`TcpServer`、`UdpServer` 和 `QuicServer` 的 handler 型 `serve` 在每个 worker 线程内独立限制已交付 handler future 数量，默认和显式 0 均不限制。
+- 定义 `TcpServiceConfig`/`UdpServiceConfig` 的 socket 创建后初始化回调；该回调默认不存在，在底层 socket 创建后、内部 socket 选项和 bind/listen 前同步执行。
+- 将公开 service config 拆分为 `TcpServiceConfig` 和 `UdpServiceConfig`；TCP 入口只接受 TCP 配置，UDP/QUIC 入口只接受 UDP 配置，UDP/QUIC 专属 routed packet channel capacity 不进入 TCP 配置类型。
+- 定义 `TcpServiceConfig::max_concurrency_per_worker` 和 `UdpServiceConfig::max_concurrency_per_worker`；`TcpServer`、`UdpServer` 和 `QuicServer` 的 handler 型 `serve` 在每个 worker 线程内独立限制已交付 handler future 数量，默认和显式 0 均不限制。
 - 定义 `ServerRuntime` 运行期抽象；TCP/UDP/QUIC-aware UDP server task 通过单协议 `serve` 入口投递到 runtime worker 线程，`serve` 返回对应 server 对象，server 对象负责显式关闭自身 task。
 - 定义 `UdpServer::serve_socket` 和 `QuicServer::serve_socket` socket-only serve 入口；该入口创建监听 socket 并在监听 worker 线程通过用户回调交付统一 `UdpSocket` 和该 socket 所属 worker id，不调用数据包 handler。
 - 定义默认关闭的 `quinn` feature；启用后在统一 `UdpSocket` 上暴露调用方实现 quinn `AsyncUdpSocket` adapter 所需的非阻塞收发和 readiness 接口，不让本 crate 直接依赖 quinn。
 - 定义 `QuicServer` 作为 QUIC-aware UDP 包分配入口；该入口只解析足够的 QUIC header 路由字段来选择 worker，不实现 TLS、handshake、connection 或 stream。
+- 定义 fallback 用户态 UDP/QUIC routed packet channel 的有界容量配置；默认容量常量在接口层定义为 4096，Windows 目标调用方可通过 `UdpServiceConfig` 覆盖，非 Windows 目标不暴露该公开容量接口，所有 runtime 后端的 routed packet channel 都必须使用该容量创建有界队列；`TcpServer` 和 `TcpServiceConfig` 不读取、不校验该容量。
 - 定义 `QuicCidGenerator`，为上层 QUIC/Quinn adapter 生成符合 `QuicServer` 固定 2 字节 worker index 前缀 layout 的 CID bytes。
 - 定义一个 `examples/hyper_static.rs` 示例，用 hyper 在 `TcpServer` 回调中处理 HTTP 静态文件请求，并允许通过命令行参数设置静态文件根目录和监听地址。
 - 定义 crates.io 发布所需的 Cargo package 元数据和 package 文件包含边界，不改变 crate 公开 API、依赖或运行行为。
@@ -42,15 +44,15 @@ approved_at: 2026-05-30
 - 不执行 `cargo publish`，不引入发布自动化脚本，不用 package 元数据承诺 HTTP、TLS 或完整 QUIC server 能力。
 
 ## 总体方案
-`sfo-reuseport` 公开一个小型 builder/config API。调用方创建 `ServerRuntime`，由 runtime 初始化共享 worker 数，再通过单协议 TCP/UDP/QUIC-aware UDP 入口显式借用该 runtime 投递 server task。公开 API 中每个 server 类型只保留一个同步 `serve(&ServerRuntime, ServiceConfig, handler)` 方法，不再提供无 runtime 参数的默认启动入口、`serve_with_runtime` 并列入口或 `add_*_listener` 动态新增入口。`serve` 完成 socket bind 和 worker task 提交后分别返回 `Result<TcpServer, Error>`、`Result<UdpServer, Error>` 或 `Result<QuicServer, Error>`，不在方法内部 await `pending` 或其他永不完成的 lifecycle future；返回的 server 对象持有关闭信号和监听 socket 集合，负责显式关闭自身 server task。
+`sfo-reuseport` 公开一个小型 builder/config API。调用方创建 `ServerRuntime`，由 runtime 初始化共享 worker 数，再通过单协议 TCP/UDP/QUIC-aware UDP 入口显式借用该 runtime 投递 server task。公开 API 中每个 server 类型只保留一个同步 `serve(&ServerRuntime, <typed config>, handler)` 方法，其中 TCP 使用 `TcpServiceConfig`，UDP/QUIC 使用 `UdpServiceConfig`；不再提供无 runtime 参数的默认启动入口、`serve_with_runtime` 并列入口或 `add_*_listener` 动态新增入口。`serve` 完成 socket bind 和 worker task 提交后分别返回 `Result<TcpServer, Error>`、`Result<UdpServer, Error>` 或 `Result<QuicServer, Error>`，不在方法内部 await `pending` 或其他永不完成的 lifecycle future；返回的 server 对象持有关闭信号和监听 socket 集合，负责显式关闭自身 server task。
 
-`ServiceConfig::max_concurrency_per_worker` 是 handler 型 `serve` 的 per-server 配置。值为 `None` 或 `Some(0)` 时不限制并发；值为 `Some(n)` 且 `n > 0` 时，每个 worker 线程为该 server 维护独立 permit 计数，最多允许该 worker 同时运行 `n` 个已交付用户 handler future。该计数不跨 worker 汇总，不创建全局共享池，也不改变 `ServerRuntimeConfig` 的 worker 数量。TCP、UDP 和 QUIC-aware UDP listener loop 在执行 accept/recv 前先等待本 worker 的 permit；permit 可用后才执行 accept/recv 并投递 handler。handler future 完成、返回错误或 panic unwind 被 runtime 结束时释放对应 permit。server close/drop 或 runtime shutdown 会唤醒正在等待 permit 的 listener loop，使其在未取得新工作前退出；已经交付的 handler future 仍不被强制取消。socket-only `serve_socket` 不使用该限制，因为数据读取和应用 handler 生命周期由调用方自行管理。
+`TcpServiceConfig::max_concurrency_per_worker` 和 `UdpServiceConfig::max_concurrency_per_worker` 是 handler 型 `serve` 的 per-server 配置。值为 `None` 或 `Some(0)` 时不限制并发；值为 `Some(n)` 且 `n > 0` 时，每个 worker 线程为该 server 维护独立 permit 计数，最多允许该 worker 同时运行 `n` 个已交付用户 handler future。该计数不跨 worker 汇总，不创建全局共享池，也不改变 `ServerRuntimeConfig` 的 worker 数量。TCP、UDP 和 QUIC-aware UDP listener loop 在执行 accept/recv 前先等待本 worker 的 permit；permit 可用后才执行 accept/recv 并投递 handler。handler future 完成、返回错误或 panic unwind 被 runtime 结束时释放对应 permit。server close/drop 或 runtime shutdown 会唤醒正在等待 permit 的 listener loop，使其在未取得新工作前退出；已经交付的 handler future 仍不被强制取消。socket-only `serve_socket` 不使用该限制，因为数据读取和应用 handler 生命周期由调用方自行管理。
 
 `UdpServer` 和 `QuicServer` 返回对象还提供获取监听 socket 的公开方法。该方法优先检查调用线程是否是该 server 的监听 worker 线程并拥有正在监听的 socket；若是，则返回本线程 socket。若调用线程没有该 server 的监听 socket，则从该 server 持有的监听 socket 集合中随机选择一个返回。无可用监听 socket、server 已关闭或 socket 无法按当前 runtime feature 安全 clone/share 时返回 `Error`，具体错误变体在实现阶段复用 `Error::Runtime` 或补充不扩大 proposal 的内部错误上下文。
 
 `UdpSocket` 是 crate 公开的统一 UDP socket 抽象，由 core 层提供并在 crate 根 re-export。它内部持有所选 runtime feature 的 UDP socket handle；Linux/BSD reuse-port 路径可以包装每 worker 的真实监听 socket，Windows 或其他 fallback 路径可以包装单个共享 socket 或模拟后端。公开方法至少覆盖应用自读和响应所需的 `recv_from`、`send_to` 和 `local_addr`；调用方不需要按平台或 runtime feature 分支。
 
-`UdpServer::serve_socket(runtime, config, callback)` 和 `QuicServer::serve_socket(runtime, config, callback)` 是 socket-only serve 入口。Rust 不支持按参数数量重载同名 associated function，因此该入口使用 `serve_socket` 命名，归属同一 serve-family。它复用 `ServiceConfig` 校验、socket 创建、socket 初始化回调和平台 bind 逻辑，创建后在监听 worker 线程通过 `callback(UdpSocket, usize)` 交付 socket 和该 socket 所属 worker id，并返回对应 `UdpServer` 或 `QuicServer` 生命周期对象。支持 `SO_REUSEPORT` worker socket 的平台为每个 worker 创建监听 socket，并在该 worker 线程交付该 worker 的真实监听 socket和对应 worker id。不支持该能力的平台创建内部接收后端，并向每个 worker 回调交付一个统一 `UdpSocket` 视图和对应 worker id；这些 fallback socket 视图只能接收按内部 Linux 兼容调度或 QUIC worker index 前缀路由属于该 worker 的数据。该入口不调用 UDP/QUIC 数据包 handler；返回后应用在 socket 回调中自行调用 `recv_from` 和协议处理，并可用 worker id 选择 worker-local 状态。`QuicServer::serve_socket` 的 fallback 路径仍使用固定 QUIC worker index 前缀规则隔离 worker 数据，但不把该规则暴露为可配置策略。
+`UdpServer::serve_socket(runtime, config, callback)` 和 `QuicServer::serve_socket(runtime, config, callback)` 是 socket-only serve 入口。Rust 不支持按参数数量重载同名 associated function，因此该入口使用 `serve_socket` 命名，归属同一 serve-family。它复用 `UdpServiceConfig` 校验、socket 创建、socket 初始化回调和平台 bind 逻辑，创建后在监听 worker 线程通过 `callback(UdpSocket, usize)` 交付 socket 和该 socket 所属 worker id，并返回对应 `UdpServer` 或 `QuicServer` 生命周期对象。支持 `SO_REUSEPORT` worker socket 的平台为每个 worker 创建监听 socket，并在该 worker 线程交付该 worker 的真实监听 socket和对应 worker id。不支持该能力的平台创建内部接收后端，并向每个 worker 回调交付一个统一 `UdpSocket` 视图和对应 worker id；这些 fallback socket 视图只能接收按内部 Linux 兼容调度或 QUIC worker index 前缀路由属于该 worker 的数据。该入口不调用 UDP/QUIC 数据包 handler；返回后应用在 socket 回调中自行调用 `recv_from` 和协议处理，并可用 worker id 选择 worker-local 状态。`QuicServer::serve_socket` 的 fallback 路径仍使用固定 QUIC worker index 前缀规则隔离 worker 数据，但不把该规则暴露为可配置策略。
 
 `quinn` feature 是默认关闭的公开 API 扩展 feature，不加入默认 feature 集。启用后，`UdpSocket` 额外提供标准库类型表达的 adapter helper：非阻塞 `try_send_to`、`poll_send_ready`、单 buffer `poll_recv_from` 和可选 vectored `poll_recv_from_vectored`。这些方法不引用 quinn crate，也不要求本 crate 依赖 quinn；调用方 adapter 负责把这些方法桥接到具体 quinn 版本的 `AsyncUdpSocket`、`Transmit` 和 `RecvMeta`。`runtime-tokio` 真实监听 socket 路径直接委托 tokio socket readiness 和非阻塞 I/O；fallback `RoutedUdpSocket` 路径从内部 routed packet queue poll 接收，并用内部真实 `std::net::UdpSocket` clone 执行非阻塞发送。`runtime-async-std` 和 `runtime-tokio-uring` 组合必须保持 `quinn` feature 可编译；当对应 runtime socket 不提供无 unsafe、无新增依赖的 readiness/nonblocking 能力时，这些 helper 返回明确 `Unsupported`。该设计保证 `QuicServer::serve_socket` 交付的 tokio 真实 socket 和 routed socket 视图都可通过同一组接口适配 quinn，同时不承诺 routed 路径支持 GSO/GRO/ECN fast path。quinn adapter 的 `max_transmit_segments`、`max_receive_segments` 和 `may_fragment` 能力声明由调用方常量实现，不进入本 crate API。
 
@@ -125,19 +127,21 @@ approved_at: 2026-05-30
 | CHG-runtime-features | P-runtime | `Cargo.toml` features、`runtime` 模块、互斥 compile_error、runtime 原生类型别名。 | `Cargo.toml`、`src/runtime.rs` 或 `src/runtime/`、`src/lib.rs` | 公开回调类型随 feature 变化。 | 默认 `runtime-tokio`。 |
 | CHG-tokio-uring-runtime | P-tokio-uring-runtime | 新增 `runtime-tokio-uring` feature、`tokio-uring` 可选依赖、Linux-only cfg 边界、`src/runtime/tokio_uring.rs` adapter、公开 `TcpStream` 类型映射到 tokio-uring net 类型或等价接口、统一 `UdpSocket` 在 tokio-uring feature 下包装 tokio-uring UDP I/O、标准 socket 转换入口和每 worker current-thread tokio-uring driver 启动方式。 | `Cargo.toml`、`src/lib.rs`、`src/runtime/mod.rs`、`src/runtime/tokio_uring.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`examples/` | 第三个互斥 runtime feature；启用后用户 TCP handler 可直接调用 tokio-uring stream API，UDP handler 通过统一 `UdpSocket` 使用等价 UDP I/O；非 Linux 平台编译期拒绝或明确 unsupported。 | 不新增 server API；不允许与 tokio/async-std 同时启用；tokio-uring 非 Linux 可运行支持不属于 v0.1 承诺；不要求 UDP 公开类型直接等于 tokio-uring 原生 socket。 |
 | CHG-server-runtime | P-server-runtime | `ServerRuntimeConfig` 持有共享 worker 数，server config 不含 worker 数量或调度策略；`TcpServer`、`UdpServer`、`QuicServer` 单协议入口只接受显式 `&ServerRuntime`，并作为同步 server task 投递方法返回对应 server 对象。 | `src/core/config.rs`、`src/core/server_runtime.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/lib.rs` | 公开运行时入口命名为 `ServerRuntime`；worker 配置从 server config 移到 runtime config；移除无 runtime 参数 `serve` 和 `serve_with_runtime`；`serve` 返回值不是 future，而是 `TcpServer`、`UdpServer` 或 `QuicServer`。 | 不提供每 server 独立 worker 池、隐式默认 runtime 入口或公开 `add_*_listener` API；不让 `serve` 通过 `pending` 挂起。 |
+| CHG-service-config-split | P-service-config-split | 新增公开 `TcpServiceConfig` 和 `UdpServiceConfig`；`TcpServer::serve` 接受 `TcpServiceConfig`；`UdpServer::serve`、`UdpServer::serve_socket`、`QuicServer::serve` 和 `QuicServer::serve_socket` 接受 `UdpServiceConfig`；平台 bind helper 通过内部 `SocketConfig` trait 复用 bind address、socket options 和 socket init callback；crate root re-export 两个配置类型且不再 re-export 共用 service config。 | `src/core/config.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/core/quic.rs`、`src/platform/`、`src/lib.rs`、`tests/unit/`、`tests/integration/`、`examples/` | 公开 API 拆分 TCP 与 UDP/QUIC 配置；`TcpServiceConfig` 不包含 routed packet channel capacity；`UdpServiceConfig` 仅在 Windows 公开 routed packet channel capacity builder/getter，默认容量 4096；共享字段保持相同行为。 | 不保留公共 service config 兼容别名；不把 UDP/QUIC 专属配置暴露给 TCP；不改变 `SocketOptions` 和 `SocketInitCallback` 的语义。 |
 | CHG-worker-thread-runtime | P-worker-thread-runtime | `runtime` 模块提供 worker thread 启动入口；每个 worker loop 在独立 OS 线程中初始化并运行单线程 async runtime。 | `src/runtime/`、`src/core/worker.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/core/dynamic.rs` | worker loop 不再直接依赖调用方当前 runtime 的 `spawn` 代表 worker。 | 不提供 work stealing 或多线程 per-worker runtime。 |
 | CHG-worker-model | P-workers | `ServerRuntimeConfig` worker 数量、默认 CPU 数、worker spawn/join、内部 worker id；socket-only serve 回调接收 socket 所属 worker id。 | `src/core/worker.rs`、`src/core/udp.rs`、`src/core/quic.rs` | 常规 TCP/UDP/QUIC handler 回调不包含 worker id；`UdpServer::serve_socket` 和 `QuicServer::serve_socket` 回调包含 worker id。 | worker id 仅用于内部状态和 socket-only 应用自读场景，不进入常规 packet/connection handler。 |
-| CHG-tcp-serve | P-tcp | 同步 `TcpServer::serve(&ServerRuntime, ServiceConfig, handler) -> Result<TcpServer, Error>` 创建 TCP listener、提交 accept task、每连接 async 回调；task 投递完成后立即返回 `TcpServer` 对象。 | `src/core/tcp.rs`、`src/platform/` | TCP serve API 只通过显式 runtime 入口暴露，调用方不需要 `.await` 才能完成启动，返回对象可显式关闭 TCP server task。 | 回调接收 runtime 原生 `TcpStream`；不保留 `serve_with_runtime`；不在 `serve` 内部使用 `pending`。 |
-| CHG-udp-runtime-socket | P-udp | 同步 `UdpServer::serve(&ServerRuntime, ServiceConfig, handler) -> Result<UdpServer, Error>` 提交 UDP recv task、交付 packet metadata，并把 crate 统一 `UdpSocket` 交给 handler；不导出 `BalancedUdpSocket`；task 投递完成后立即返回 `UdpServer` 对象；`UdpServer` 可按本线程优先、否则随机的规则获取监听 socket。 | `src/core/udp.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | UDP serve API 只通过显式 runtime 入口暴露，UDP handler 与统一 `UdpSocket` 绑定并隐藏平台差异，调用方不需要 `.await` 才能完成启动，返回对象可显式关闭 UDP server task并获取监听 socket。 | 不保留 `BalancedUdpSocket` 或 `serve_with_runtime`；不要求 UDP 公开类型直接等于各 runtime 或平台原生 socket；实现仍负责保护内部 bind/reuse-port 状态不被配置覆盖；不在 `serve` 内部使用 `pending`。 |
-| CHG-udp-quic-listener-serve | P-udp-quic-listener-serve | 新增 `UdpServer::serve_socket(&ServerRuntime, ServiceConfig, callback) -> Result<UdpServer, Error>` 和 `QuicServer::serve_socket(&ServerRuntime, ServiceConfig, callback) -> Result<QuicServer, Error>`，复用 UDP socket 创建、配置校验和 socket 初始化回调，在监听 worker 线程通过回调交付统一监听 `UdpSocket` 和 socket 所属 worker id，不调用数据包 handler。 | `src/core/udp.rs`、`src/core/quic.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | 新增 UDP/QUIC socket-only serve-family 入口；调用方显式传入 `&ServerRuntime`、`ServiceConfig` 和 socket 回调，在每个监听 worker 中获得统一 `UdpSocket` 和 worker id 后自行读取数据；`SO_REUSEPORT` 路径交付每 worker 真实 socket及对应 worker id，Windows/fallback 路径交付按 worker 隔离收包的 socket 视图及对应 worker id，内部机制不暴露。 | 不为 TCP 增加 socket-only serve；不提供公开可配置普通 UDP packet 分发或 QUIC routing 策略；不调用数据包 handler；不提供无 runtime 参数入口；不改变 handler 型 `serve` 签名；不向常规 UDP/QUIC packet handler 传递 worker id。 |
+| CHG-tcp-serve | P-tcp | 同步 `TcpServer::serve(&ServerRuntime, TcpServiceConfig, handler) -> Result<TcpServer, Error>` 创建 TCP listener、提交 accept task、每连接 async 回调；task 投递完成后立即返回 `TcpServer` 对象。 | `src/core/tcp.rs`、`src/platform/` | TCP serve API 只通过显式 runtime 入口暴露，调用方不需要 `.await` 才能完成启动，返回对象可显式关闭 TCP server task。 | 回调接收 runtime 原生 `TcpStream`；不保留 `serve_with_runtime`；不在 `serve` 内部使用 `pending`。 |
+| CHG-udp-runtime-socket | P-udp | 同步 `UdpServer::serve(&ServerRuntime, UdpServiceConfig, handler) -> Result<UdpServer, Error>` 提交 UDP recv task、交付 packet metadata，并把 crate 统一 `UdpSocket` 交给 handler；不导出 `BalancedUdpSocket`；task 投递完成后立即返回 `UdpServer` 对象；`UdpServer` 可按本线程优先、否则随机的规则获取监听 socket。 | `src/core/udp.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | UDP serve API 只通过显式 runtime 入口暴露，UDP handler 与统一 `UdpSocket` 绑定并隐藏平台差异，调用方不需要 `.await` 才能完成启动，返回对象可显式关闭 UDP server task并获取监听 socket。 | 不保留 `BalancedUdpSocket` 或 `serve_with_runtime`；不要求 UDP 公开类型直接等于各 runtime 或平台原生 socket；实现仍负责保护内部 bind/reuse-port 状态不被配置覆盖；不在 `serve` 内部使用 `pending`。 |
+| CHG-udp-quic-listener-serve | P-udp-quic-listener-serve | 新增 `UdpServer::serve_socket(&ServerRuntime, UdpServiceConfig, callback) -> Result<UdpServer, Error>` 和 `QuicServer::serve_socket(&ServerRuntime, UdpServiceConfig, callback) -> Result<QuicServer, Error>`，复用 UDP socket 创建、配置校验和 socket 初始化回调，在监听 worker 线程通过回调交付统一监听 `UdpSocket` 和 socket 所属 worker id，不调用数据包 handler。 | `src/core/udp.rs`、`src/core/quic.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | 新增 UDP/QUIC socket-only serve-family 入口；调用方显式传入 `&ServerRuntime`、`TcpServiceConfig`/`UdpServiceConfig` 和 socket 回调，在每个监听 worker 中获得统一 `UdpSocket` 和 worker id 后自行读取数据；`SO_REUSEPORT` 路径交付每 worker 真实 socket及对应 worker id，Windows/fallback 路径交付按 worker 隔离收包的 socket 视图及对应 worker id，内部机制不暴露。 | 不为 TCP 增加 socket-only serve；不提供公开可配置普通 UDP packet 分发或 QUIC routing 策略；不调用数据包 handler；不提供无 runtime 参数入口；不改变 handler 型 `serve` 签名；不向常规 UDP/QUIC packet handler 传递 worker id。 |
 | CHG-linux-compatible-scheduling | P-linux-compatible-scheduling | 删除公开 `DispatchPolicy` 和 dispatcher 配置；`ServerRuntimeConfig` 不包含调度字段；fallback 用户态路径使用内部 Linux 兼容 hash 选择 worker；`QuicServer` 继续使用固定 2 字节 worker index 前缀规则。 | `src/core/config.rs`、`src/core/schedule.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/core/mod.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | 公开 API 不导出 Dispatcher/DispatchPolicy，不提供 `Auto`、`RoundRobin`、`SrcHash`、`Custom` 或自定义 selector；平台 fallback 行为保持内部实现细节。 | 不提供可配置、load-aware、adaptive 或用户自定义 scheduler。 |
 | CHG-platform-behavior | P-platform | `PlatformSocketOps` trait 和 cfg-gated Linux/BSD/Windows 实现。 | `src/platform/` | 平台差异不进入公开 API。 | Windows 走用户态模拟。 |
 | CHG-socket-options | P-socket-options | `SocketOptions`、IPv4/IPv6 transparent 能力检查、设置时机和错误分类。 | `src/core/config.rs`、`src/platform/` | 配置层新增受控 socket 选项。 | 不允许覆盖内部 reuse-port/bind 状态。 |
-| CHG-socket-init-callback | P-socket-init-callback | `ServiceConfig` 持有默认 `None` 的 socket 创建后回调；平台层创建 `socket2::Socket` 后、内部选项和 bind/listen 前调用；回调错误转换为 `Error::SocketInitCallback` 并阻止服务启动。 | `src/core/config.rs`、`src/core/error.rs`、`src/platform/`、`src/core/tcp.rs`、`src/core/udp.rs` | 公开配置层新增一次性初始化钩子；不暴露 socket 所有权，不允许回调返回后继续持有可变访问权。 | 回调接收借用的 `socket2::Socket`，可调用 socket2 支持的 setter；跨平台可用性由调用方和底层 OS 负责。 |
+| CHG-socket-init-callback | P-socket-init-callback | `TcpServiceConfig` 和 `UdpServiceConfig` 持有默认 `None` 的 socket 创建后回调；平台层创建 `socket2::Socket` 后、内部选项和 bind/listen 前调用；回调错误转换为 `Error::SocketInitCallback` 并阻止服务启动。 | `src/core/config.rs`、`src/core/error.rs`、`src/platform/`、`src/core/tcp.rs`、`src/core/udp.rs` | 公开配置层新增一次性初始化钩子；不暴露 socket 所有权，不允许回调返回后继续持有可变访问权。 | 回调接收借用的 `socket2::Socket`，可调用 socket2 支持的 setter；跨平台可用性由调用方和底层 OS 负责。 |
 | CHG-dynamic-listeners | P-dynamic-listeners | 不保留 `ServerRuntime` 内部 listener registry、`ListenerId`、`ListenerProtocol`、`remove_listener` 和公开 `add_*_listener` 管理面；TCP/UDP/QUIC-aware UDP server task 只通过 `serve` 投递；`serve` 返回的 `TcpServer`、`UdpServer` 或 `QuicServer` 对象提供显式关闭能力。 | `src/core/config.rs`、`src/core/server_runtime.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | 公开 API 不提供 listener 动态新增入口；内部 helper 只需服务 `serve` task 投递、server 对象关闭和 runtime drop 停止边界。 | 不提供独立 stop handle 或按 listener id 删除；已经交付的 handler future 不由 balancer 强制取消。 |
-| CHG-server-concurrency-limit | P-server-concurrency-limit | `ServiceConfig::max_concurrency_per_worker` 配置 handler 型 `TcpServer::serve`、`UdpServer::serve` 和 `QuicServer::serve` 的每 worker handler 并发上限；默认 `None` 和显式 `Some(0)` 均不限制；每个 worker 为每个 server 独立维护 permit，不做全局共享池；listener loop 在 accept/recv 前等待 permit；close/drop 唤醒等待 permit 的 loop 并退出。 | `src/core/config.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/core/quic.rs`、`tests/unit/`、`tests/integration/` | 公开配置层新增 per-server 字段和 builder；上限不改变 `ServerRuntimeConfig` worker 数量，不向 handler 暴露 worker id；handler 型 serve 达到上限时等待新许可，不主动丢弃连接或数据包；`serve_socket` 不纳入该限制。 | 不提供请求速率限制、跨 worker 全局并发池、按客户端配额、优先级队列、超时或自适应调度；不改变已交付 handler future 的关闭语义。 |
+| CHG-server-concurrency-limit | P-server-concurrency-limit | `TcpServiceConfig::max_concurrency_per_worker` 和 `UdpServiceConfig::max_concurrency_per_worker` 配置 handler 型 `TcpServer::serve`、`UdpServer::serve` 和 `QuicServer::serve` 的每 worker handler 并发上限；默认 `None` 和显式 `Some(0)` 均不限制；每个 worker 为每个 server 独立维护 permit，不做全局共享池；listener loop 在 accept/recv 前等待 permit；close/drop 唤醒等待 permit 的 loop 并退出。 | `src/core/config.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/core/quic.rs`、`tests/unit/`、`tests/integration/` | 公开配置层新增 per-server 字段和 builder；上限不改变 `ServerRuntimeConfig` worker 数量，不向 handler 暴露 worker id；handler 型 serve 达到上限时等待新许可，不主动丢弃连接或数据包；`serve_socket` 不纳入该限制。 | 不提供请求速率限制、跨 worker 全局并发池、按客户端配额、优先级队列、超时或自适应调度；不改变已交付 handler future 的关闭语义。 |
 | CHG-mixed-protocol-workers | P-mixed-protocol-workers | TCP/UDP server task 可通过各自 `serve` 入口投递到同一 `ServerRuntime` 实例并在同一 runtime executor 上运行。 | `src/core/tcp.rs`、`src/core/udp.rs`、`src/runtime/` | 保持混合协议共享 worker，不依赖公开 add listener API。 | 不提供按协议独立线程池或负载感知调度。 |
-| CHG-quic-routed-udp | P-quic-routed-udp | 同步 `QuicServer::serve(&ServerRuntime, ServiceConfig, handler) -> Result<QuicServer, Error>`、QUIC long/short header DCID 解析、long/short header 统一 DCID 固定 2 字节 worker index 前缀解析、非法 packet 丢弃、Linux reuse-port eBPF selector 的 best-effort worker 预分配、CBPF fallback、用户态稳定 worker 投递 fallback、`QuicServer` 关闭语义和监听 socket 获取语义；task 投递完成后立即返回 `QuicServer` 对象。 | `src/core/udp.rs`、`src/core/quic.rs`、`src/core/mod.rs`、`src/lib.rs`、`src/platform/`、`tests/unit/`、`tests/dv/`、`tests/integration/` | 新增 QUIC-aware UDP routing API；不改变 `UdpServer` 裸 UDP API；`QuicServer` 也只通过显式 runtime 同步 `serve` 暴露；Linux 可用时优先尝试内核 reuse-port eBPF 预分配，eBPF 加载或 attach 失败时退回 CBPF，再失败时退回用户态路由；外部使用者必须为后续 server CID 按固定 CID layout 写入接收握手首包的 worker index 前缀；返回对象可显式关闭并按本线程优先、否则随机的规则获取监听 socket。 | 不实现 TLS、handshake、connection、stream、congestion control 或 quinn 集成；不支持可配置 CID layout；不支持 worker index 超过 16 bit 的 CID 路由前缀；不把 eBPF/CBPF 加载失败暴露为公开 API 或强制启动失败；不保留 `serve_with_runtime`；不在 `serve` 内部使用 `pending`；不使用来源四元组 hash、随机 worker 或连接状态表作为 QUIC 握手 fallback。 |
+| CHG-quic-routed-udp | P-quic-routed-udp | 同步 `QuicServer::serve(&ServerRuntime, UdpServiceConfig, handler) -> Result<QuicServer, Error>`、QUIC long/short header DCID 解析、long/short header 统一 DCID 固定 2 字节 worker index 前缀解析、非法 packet 丢弃、Linux reuse-port eBPF selector 的 best-effort worker 预分配、CBPF fallback、用户态稳定 worker 投递 fallback、`QuicServer` 关闭语义和监听 socket 获取语义；task 投递完成后立即返回 `QuicServer` 对象。 | `src/core/udp.rs`、`src/core/quic.rs`、`src/core/mod.rs`、`src/lib.rs`、`src/platform/`、`tests/unit/`、`tests/dv/`、`tests/integration/` | 新增 QUIC-aware UDP routing API；不改变 `UdpServer` 裸 UDP API；`QuicServer` 也只通过显式 runtime 同步 `serve` 暴露；Linux 可用时优先尝试内核 reuse-port eBPF 预分配，eBPF 加载或 attach 失败时退回 CBPF，再失败时退回用户态路由；外部使用者必须为后续 server CID 按固定 CID layout 写入接收握手首包的 worker index 前缀；返回对象可显式关闭并按本线程优先、否则随机的规则获取监听 socket。 | 不实现 TLS、handshake、connection、stream、congestion control 或 quinn 集成；不支持可配置 CID layout；不支持 worker index 超过 16 bit 的 CID 路由前缀；不把 eBPF/CBPF 加载失败暴露为公开 API 或强制启动失败；不保留 `serve_with_runtime`；不在 `serve` 内部使用 `pending`；不使用来源四元组 hash、随机 worker 或连接状态表作为 QUIC 握手 fallback。 |
+| CHG-routed-packet-channel-limit | P-routed-packet-channel-limit | `UdpServiceConfig` 在 Windows 目标公开 `routed_packet_channel_capacity` builder/getter；接口层定义 `DEFAULT_ROUTED_PACKET_CHANNEL_CAPACITY: usize = 4096`；`UdpServer`/`QuicServer` 入口校验容量大于 0，fallback routed socket 创建时把该容量传入 `routed_packet_channel(capacity)`；async-std 使用 `bounded(capacity)`，tokio 使用 `mpsc::channel(capacity)`，tokio-uring/std fallback 使用 `std::sync::mpsc::sync_channel(capacity)`；满队列时分发 loop 等待发送完成以形成背压，关闭时 sender/receiver 断开使等待退出；`TcpServer` 不读取、不校验该字段。 | `src/core/config.rs`、`src/core/udp.rs`、`src/core/quic.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | Windows 公开配置层新增 routed packet channel 容量 builder/getter 和默认常量；非 Windows 不暴露公开容量接口；默认行为从无界队列变为 4096 容量有界队列；Windows 显式配置可覆盖容量；fallback 路径不再允许 routed packet channel 无界增长；TCP 服务不因该配置失败。 | 不为 TCP 增加 routed packet channel 语义；不为测试夹具 channel 增加容量配置；不改变 runtime executor task submission channel；不引入通用跨 worker channel API；容量必须大于 0，显式 0 只在 UDP/QUIC 服务入口是配置错误。 |
 | CHG-quic-cid-generator | P-quic-cid-generator | 新增 `QuicCidGenerator` 公开类型；默认生成 8 字节 CID；允许配置 8..=20 字节 CID 长度；worker index 按网络字节序写入固定 2 字节前缀；剩余字节通过 `getrandom` 从 OS 随机源填充；提供 `new(worker_index)`, `for_worker(worker_index)`, `with_cid_len`, `generate` 和 `generate_into`。 | `Cargo.toml`、`src/core/cid.rs`、`src/core/mod.rs`、`src/lib.rs`、`tests/unit/` | 公开 API 新增 crate 自有 CID byte generator；调用方可把返回 bytes 包装成 quinn 或其他 QUIC 库的 CID 类型；生成结果与 `QuicServer` 固定 worker index 前缀路由一致。 | 不实现 quinn trait，不引入 quinn 依赖，不支持可配置 CID layout、HMAC、防伪、超过 16 bit 的 worker index、CID 生命周期管理或连接状态表。 |
 | CHG-quinn-udp-socket-compat | P-quinn-udp-socket-compat | 新增默认关闭的 `quinn` feature；启用该 feature 后，统一 `UdpSocket` 暴露本 crate 自有的非阻塞发送、发送 ready poll、接收 poll 和 vectored 接收 helper，接口只使用标准库和本 crate 类型，`runtime-tokio` 真实 socket 与 fallback routed socket 视图都可用，其他 runtime 组合保持可编译并在不具备 readiness/nonblocking 能力时返回 unsupported。 | `Cargo.toml`、`src/core/udp.rs`、`src/runtime/`、`tests/unit/`、`tests/integration/` | 默认 API 不增加 quinn adapter helper；启用 `quinn` feature 后，调用方可基于同一 `UdpSocket` 为 quinn `AsyncUdpSocket` 编写 adapter；tokio native 和 routed socket 不需要调用方按平台或 native/routed 分支；本 crate 不实现 quinn trait。 | 不把 quinn 或 quinn-udp 加入默认依赖；不在本 crate 中实现 quinn `AsyncUdpSocket`；不暴露 quinn 类型；不承诺 async-std/tokio-uring native socket 提供 readiness/nonblocking quinn adapter fast path；不提供 GSO/GRO/ECN fast path 承诺；不新增能力查询方法。 |
 | CHG-hyper-static-example | P-hyper-static-example | `examples/hyper_static.rs` 使用 hyper HTTP/1 connection API 包装 `TcpServer` 交付的 TCP stream；示例解析 `--root <path>` 和 `--addr <socket-addr>`，将 URL path 映射到静态根目录内文件，目录请求尝试 `index.html`，非法路径拒绝，缺失文件返回 404。 | `Cargo.toml`、`examples/hyper_static.rs`、`tests/` 或 harness 可达的示例验证 | 新增示例 binary 和 example-only 依赖；不改变 `src/` 公开 API。 | 依赖允许使用 `hyper`、`hyper-util`、`http-body-util` 和 `bytes`；参数解析用标准库，避免新增 CLI 依赖。 |
@@ -147,7 +151,7 @@ approved_at: 2026-05-30
 | 阶段 | 目标 | 前置条件 | 输出 | 依赖 | 可并行 |
 |------|------|----------|------|------|--------|
 | 1 | 建立 library crate、features 和 runtime 抽象。 | proposal/design approved，schema-check 与 admission-check 通过。 | `src/lib.rs`、`runtime`、feature gating。 | none | no |
-| 2 | 建立公开配置、错误、worker 模型和 Linux 兼容内部调度。 | 阶段 1 | `ServerRuntimeConfig`、`ServiceConfig`、`SocketOptions`、worker core、内部 scheduling helper。 | runtime | no |
+| 2 | 建立公开配置、错误、worker 模型和 Linux 兼容内部调度。 | 阶段 1 | `ServerRuntimeConfig`、`TcpServiceConfig`、`UdpServiceConfig`、`SocketOptions`、worker core、内部 scheduling helper。 | runtime | no |
 | 3 | 建立平台接口和 Linux/BSD/Windows 后端骨架。 | 阶段 2 | `PlatformSocketOps` 和 cfg-gated platform modules。 | core config | yes |
 | 4 | 实现 TCP 服务路径。 | 阶段 1-3 | TCP bind、accept loop、回调交付、`TcpServer` 返回对象和关闭方法。 | runtime、platform、worker | yes |
 | 5 | 实现 UDP 服务路径。 | 阶段 1-3 | 统一 `UdpSocket` handler 参数、packet loop、send/response API 使用方式、`UdpServer` 返回对象、关闭方法、监听 socket 获取方法和回调式 `serve_socket`。 | runtime、platform、内部 scheduling helper | yes |
@@ -158,7 +162,8 @@ approved_at: 2026-05-30
 | 10 | 增加 quinn UDP socket adapter helper。 | `CHG-quinn-udp-socket-compat` admission 通过，统一 `UdpSocket` 和 `serve_socket` 可用。 | 默认关闭的 `quinn` feature、feature-gated `UdpSocket` poll/readiness helper、tokio native/routed 统一行为，以及其他 runtime 的 unsupported 边界。 | udp、runtime、Cargo feature | no |
 | 11 | 增加 hyper 静态文件服务器示例。 | `CHG-hyper-static-example` admission 通过，`TcpServer` 与 `ServerRuntime` 可用。 | `examples/hyper_static.rs`、必要 example 依赖和示例验证。 | tcp、runtime、Cargo example deps | no |
 | 12 | 补齐 crates.io 发布元数据。 | `CHG-publish-metadata` admission 通过。 | `Cargo.toml` package metadata 和 include 边界。 | none | yes |
-| 13 | 增加每 worker handler 并发数限制。 | `CHG-server-concurrency-limit` admission 通过，`TcpServer`、`UdpServer`、`QuicServer` handler 型 serve 可用。 | `ServiceConfig::max_concurrency_per_worker`、每 worker permit helper、TCP/UDP/QUIC accept/recv 前等待、close/drop 唤醒等待 loop。 | config、tcp、udp、quic、runtime close signal | no |
+| 13 | 增加每 worker handler 并发数限制。 | `CHG-server-concurrency-limit` admission 通过，`TcpServer`、`UdpServer`、`QuicServer` handler 型 serve 可用。 | `TcpServiceConfig::max_concurrency_per_worker`、`UdpServiceConfig::max_concurrency_per_worker`、每 worker permit helper、TCP/UDP/QUIC accept/recv 前等待、close/drop 唤醒等待 loop。 | config、tcp、udp、quic、runtime close signal | no |
+| 14 | 增加 routed packet channel 容量限制。 | `CHG-routed-packet-channel-limit` admission 通过，fallback routed socket 路径可用。 | `DEFAULT_ROUTED_PACKET_CHANNEL_CAPACITY`、Windows-only `UdpServiceConfig::routed_packet_channel_capacity`、有界 routed channel 创建和满队列背压。 | config、udp、runtime feature 后端 | no |
 
 ## 关键决策
 - 使用 compile-time feature 选择 runtime，而不是 runtime trait object。原因是公开 TCP 回调必须包含当前 runtime 的原生 `TcpStream` 类型；UDP 通过统一 `UdpSocket` 抽象在 core 层封装 runtime 差异。
@@ -172,7 +177,8 @@ approved_at: 2026-05-30
 - 不提供公开 `DispatchPolicy` 或 dispatcher 配置。支持内核 `SO_REUSEPORT` worker 分配的平台优先使用平台路径；没有可用 `SO_REUSEPORT` worker 分配能力的系统使用内部 Linux 兼容调度函数保持公开 API 行为一致。
 - Linux 兼容内部调度以连接或数据包的四元组元信息为输入，使用稳定 hash 映射到 `worker_count`；缺少 peer 地址时回退到本地地址和协议类别可用信息。该函数只在 fallback 用户态路径使用，不进入公开 API。
 - server task 生命周期由 `serve` 返回的 server 对象和 `ServerRuntime` 共同控制；server 对象关闭时只停止自身 task 的后续 accept/recv，runtime drop 时关闭 worker executor，并通过共享运行状态让不在 worker executor 内的模拟 accept/recv 线程退出。v0.1 不提供按 listener id 删除单个 listener 的公开能力，已经交付给 handler 的 TCP/UDP work item 不由 balancer 强制取消。
-- handler 并发限制使用 server task 私有的每 worker permit helper。`ServiceConfig::max_concurrency_per_worker == None` 或 `Some(0)` 时不创建有效上限；`Some(n)` 且 `n > 0` 时，每个 worker loop 在 accept/recv 前异步等待本 worker 的 permit。取得 permit 后执行一次 accept/recv 并把 permit guard 随 handler future 一起移动，future 完成后 drop guard 释放许可并唤醒同 worker 的等待者。close/drop 设置 server closed 状态并唤醒所有等待 permit 的 worker；等待者观察 closed 后退出 listener loop，不再执行新的 accept/recv。
+- handler 并发限制使用 server task 私有的每 worker permit helper。`TcpServiceConfig::max_concurrency_per_worker` 和 `UdpServiceConfig::max_concurrency_per_worker` 为 `None` 或 `Some(0)` 时不创建有效上限；`Some(n)` 且 `n > 0` 时，每个 worker loop 在 accept/recv 前异步等待本 worker 的 permit。取得 permit 后执行一次 accept/recv 并把 permit guard 随 handler future 一起移动，future 完成后 drop guard 释放许可并唤醒同 worker 的等待者。close/drop 设置 server closed 状态并唤醒所有等待 permit 的 worker；等待者观察 closed 后退出 listener loop，不再执行新的 accept/recv。
+- routed packet channel 容量限制只作用于 fallback 用户态 UDP/QUIC 分发路径。`DEFAULT_ROUTED_PACKET_CHANNEL_CAPACITY` 在公开接口层定义为 4096，并由 `UdpServiceConfig::new` 写入内部容量。Windows 目标公开 `UdpServiceConfig::with_routed_packet_channel_capacity(capacity)` 和 getter 以写入显式容量，非 Windows 目标不暴露这两个公开接口；`capacity == 0` 在 `UdpServer`/`QuicServer` 服务入口校验时返回 `Error::InvalidConfig`；`TcpServer` 和 `TcpServiceConfig` 不读取、不校验该字段。分发 loop 发送到满队列时等待可用容量，不丢弃已经通过路由解析的 packet；server close/drop 导致 active flag 关闭、socket 关闭或 channel 断开后，等待发送返回错误并退出 loop。
 - `ServerRuntime` 使用同一份 worker 数执行 TCP 与 UDP server task。每个 worker 是一个独立 OS 线程，线程内由当前 feature 选择的 runtime 初始化一个单线程 async runtime；TCP 与 UDP listener loop 作为 server task 投递到这些 worker thread runtime 上，而不是创建按协议隔离的线程池。
 - `QuicServer` 使用统一 worker 选择规则：long header packet 读取 DCID length 和完整 DCID，short header packet 读取首字节后的 DCID；只要 DCID 含有至少 2 字节，就从 DCID 开头读取固定 2 字节 worker index 前缀并计算 `worker_index % worker_count`。Initial/0-RTT 的客户端随机 DCID 因此前 2 字节天然形成首包分布；server CID 回填后的 Initial/Handshake/short packet 也继续按相同前缀回到生成该 CID 的 worker。payload 太短、DCID length 为 0、DCID 超出 payload 边界或缺少完整 2 字节 worker index 前缀时丢弃该 packet，不调用用户 handler。
 - 强约束由固定公开契约和运行时拒绝共同形成：上层 QUIC crate 必须在 server CID 的 DCID 开头写入接收 server 侧 Initial fallback 的 worker index 前缀；对端回填该 CID 后，后续 packet 通过该前缀路由回到同一 worker。worker index 使用固定 16-bit 网络字节序编码，超过 16 bit 的 worker index 不支持。`QuicServer` 不提供可配置 layout、来源地址兜底或连接状态表，所有不满足 layout 且不属于 Initial fallback 的 packet 都不会进入用户 handler。
@@ -184,9 +190,11 @@ approved_at: 2026-05-30
 ## 数据与状态
 ### 配置类型
 - `ServerRuntimeConfig`：包含共享 `workers: WorkerCount`，用于同一 runtime 实例内的所有 server task；不包含调度策略字段。
-- `ServiceConfig`：包含单协议 convenience 入口的 `bind_addr: SocketAddr`、`socket_options: SocketOptions` 和 `max_concurrency_per_worker: Option<usize>`；不包含 worker 数量。
-- `ServiceConfig::socket_init_callback`：`Option<SocketInitCallback>`，默认 `None`。当存在时，平台层在创建 TCP/UDP `socket2::Socket` 后立即调用。该回调必须同步完成，只接收借用，不可替换 socket 或保存可变访问权；返回错误时服务启动失败。
-- `ServiceConfig::max_concurrency_per_worker`：默认 `None`，表示不限制；显式 `Some(0)` 也表示不限制；`Some(n)` 且 `n > 0` 表示每个 worker 线程最多同时运行该 server 的 `n` 个常规 handler future。该字段只适用于 `TcpServer::serve`、`UdpServer::serve` 和 `QuicServer::serve`，不适用于 `serve_socket`。
+- `TcpServiceConfig`：包含 TCP 入口的 `bind_addr: SocketAddr`、`socket_options: SocketOptions`、`socket_init_callback: Option<SocketInitCallback>` 和 `max_concurrency_per_worker: Option<usize>`；不包含 worker 数量或 routed packet channel 容量。
+- `UdpServiceConfig`：包含 UDP/QUIC 入口的 `bind_addr: SocketAddr`、`socket_options: SocketOptions`、`socket_init_callback: Option<SocketInitCallback>`、`max_concurrency_per_worker: Option<usize>` 和内部 `routed_packet_channel_capacity: usize`；不包含 worker 数量。
+- `UdpServiceConfig::routed_packet_channel_capacity`：Windows-only 公开接口，配置 fallback routed socket 每 worker 接收队列容量。默认值来自 `DEFAULT_ROUTED_PACKET_CHANNEL_CAPACITY == 4096`；显式值在 `UdpServer`/`QuicServer` 中必须大于 0。该字段只影响 UDP/QUIC fallback routed packet channel，不影响 `TcpServer`、runtime executor task channel、handler 并发 permit 或测试夹具 channel；非 Windows 目标使用默认容量且不暴露公开 builder/getter。
+- `TcpServiceConfig::socket_init_callback` / `UdpServiceConfig::socket_init_callback`：`Option<SocketInitCallback>`，默认 `None`。当存在时，平台层在创建 TCP/UDP `socket2::Socket` 后立即调用。该回调必须同步完成，只接收借用，不可替换 socket 或保存可变访问权；返回错误时服务启动失败。
+- `TcpServiceConfig::max_concurrency_per_worker` / `UdpServiceConfig::max_concurrency_per_worker`：默认 `None`，表示不限制；显式 `Some(0)` 也表示不限制；`Some(n)` 且 `n > 0` 表示每个 worker 线程最多同时运行该 server 的 `n` 个常规 handler future。该字段只适用于 `TcpServer::serve`、`UdpServer::serve` 和 `QuicServer::serve`，不适用于 `serve_socket`。
 - `WorkerCount`：支持 `Default` 和显式正整数。`Default` 在构建服务时解析为 `num_cpus::get()`；显式 0 是配置错误。
 - `SocketOptions`：包含 `reuse_address: bool`、`ipv4_transparent: TransparentMode`、`ipv6_transparent: TransparentMode`。后续选项只能通过该受控类型加入。
 - `TransparentMode`：`Disabled`、`Required`、`BestEffort`。`Required` 在不支持或无权限时返回错误；`BestEffort` 记录 unsupported/permission-denied 结果但不阻止服务启动。
@@ -215,19 +223,19 @@ approved_at: 2026-05-30
 ```rust
 pub use crate::core::{
     Error, PacketMeta, QuicCidGenerator, QuicServer,
-    ServiceConfig, SocketOptions, ServerRuntime, ServerRuntimeConfig, TcpServer,
-    TransparentMode, UdpServer, UdpSocket, WorkerCount,
+    SocketOptions, ServerRuntime, ServerRuntimeConfig, TcpServer, TcpServiceConfig,
+    TransparentMode, UdpServer, UdpServiceConfig, UdpSocket, WorkerCount,
 };
 pub use crate::runtime::TcpStream;
 ```
 
-`ServiceConfig` socket 创建后回调：
+`TcpServiceConfig` / `UdpServiceConfig` socket 创建后回调：
 
 ```rust
 pub type SocketInitCallback =
     Arc<dyn Fn(&socket2::Socket) -> Result<(), Error> + Send + Sync + 'static>;
 
-impl ServiceConfig {
+impl TcpServiceConfig {
     pub fn with_socket_init_callback<F>(self, callback: F) -> Self
     where
         F: Fn(&socket2::Socket) -> Result<(), Error> + Send + Sync + 'static;
@@ -238,11 +246,31 @@ impl ServiceConfig {
 
     pub fn max_concurrency_per_worker(&self) -> Option<usize>;
 }
+
+impl UdpServiceConfig {
+    pub fn with_socket_init_callback<F>(self, callback: F) -> Self
+    where
+        F: Fn(&socket2::Socket) -> Result<(), Error> + Send + Sync + 'static;
+
+    pub fn without_socket_init_callback(self) -> Self;
+
+    pub fn with_max_concurrency_per_worker(self, max: usize) -> Self;
+
+    pub fn max_concurrency_per_worker(&self) -> Option<usize>;
+
+    #[cfg(windows)]
+    pub fn with_routed_packet_channel_capacity(self, capacity: usize) -> Self;
+
+    #[cfg(windows)]
+    pub fn routed_packet_channel_capacity(&self) -> usize;
+}
 ```
 
 回调字段默认是 `None`。`with_socket_init_callback` 将闭包包装为 `Arc`，从而允许每 worker socket 创建路径复用同一回调。回调执行顺序是：创建 `socket2::Socket`，执行用户 socket 初始化回调，执行 crate 内部 `reuse_address`、`reuse_port`、transparent 等必需选项，然后 bind/listen。内部必需选项保留最终控制权，用户回调不得依赖覆盖这些状态。
 
-`with_max_concurrency_per_worker(max)` 将 `max` 写入 `ServiceConfig::max_concurrency_per_worker`；`max == 0` 表示不限制，getter 返回保存的配置值。实现可在内部把 `None` 与 `Some(0)` 统一归一为无限制，但公开配置语义必须保持二者都不限制。
+`with_max_concurrency_per_worker(max)` 将 `max` 写入 `TcpServiceConfig::max_concurrency_per_worker` 或 `UdpServiceConfig::max_concurrency_per_worker`；`max == 0` 表示不限制，getter 返回保存的配置值。实现可在内部把 `None` 与 `Some(0)` 统一归一为无限制，但公开配置语义必须保持二者都不限制。
+
+Windows 目标下，`UdpServiceConfig::with_routed_packet_channel_capacity(capacity)` 将 fallback routed packet channel 容量写入内部容量，默认 getter 返回 4096。非 Windows 目标不暴露这两个公开接口并使用默认容量。`capacity == 0` 不在 builder 中 panic，而是在 `UdpServer`/`QuicServer` 服务入口校验中返回 `Error::InvalidConfig`。`TcpServiceConfig` 不提供该 builder，`TcpServer` 不使用 routed packet channel，因此不会读取或校验该字段。
 
 ### 公开代码接口细节
 TCP 入口：
@@ -253,7 +281,7 @@ pub struct TcpServer;
 impl TcpServer {
     pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
-        config: ServiceConfig,
+        config: TcpServiceConfig,
         handler: F,
     ) -> Result<TcpServer, Error>
     where
@@ -302,7 +330,7 @@ impl UdpSocket {
 impl UdpServer {
     pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
-        config: ServiceConfig,
+        config: UdpServiceConfig,
         handler: F,
     ) -> Result<UdpServer, Error>
     where
@@ -311,7 +339,7 @@ impl UdpServer {
 
     pub fn serve_socket<F, Fut>(
         runtime: &ServerRuntime,
-        config: ServiceConfig,
+        config: UdpServiceConfig,
         callback: F,
     ) -> Result<UdpServer, Error>
     where
@@ -332,7 +360,7 @@ pub struct QuicServer;
 impl QuicServer {
     pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
-        config: ServiceConfig,
+        config: UdpServiceConfig,
         handler: F,
     ) -> Result<QuicServer, Error>
     where
@@ -341,7 +369,7 @@ impl QuicServer {
 
     pub fn serve_socket<F, Fut>(
         runtime: &ServerRuntime,
-        config: ServiceConfig,
+        config: UdpServiceConfig,
         callback: F,
     ) -> Result<QuicServer, Error>
     where
@@ -391,7 +419,7 @@ Linux QUIC reuse-port selector 内部接口：
 
 ```rust
 pub(crate) fn bind_quic_udp_reuseport_workers(
-    config: &ServiceConfig,
+    config: &UdpServiceConfig,
     workers: usize,
 ) -> Result<Option<Vec<std::net::UdpSocket>>, Error>;
 ```
@@ -408,7 +436,7 @@ impl ServerRuntime {
 }
 ```
 
-`ServerRuntime` 不公开 `add_tcp_listener`、`add_udp_listener`、`add_quic_listener` 或 `remove_listener`。TCP/UDP/QUIC-aware UDP server task 只能通过 `TcpServer::serve`、`UdpServer::serve` 和 `QuicServer::serve` 的单协议入口投递；实现可保留私有 helper 复用 bind 和 worker 投递逻辑，但不得保留公开 listener registry 或公开 listener id 管理面。常规 handler 签名继续不包含 worker id，socket-only serve 回调按其公开契约接收 worker id。`ServiceConfig` 不提供 `with_workers` 或 worker 字段；共享 worker 数只能通过 `ServerRuntimeConfig` 设置。
+`ServerRuntime` 不公开 `add_tcp_listener`、`add_udp_listener`、`add_quic_listener` 或 `remove_listener`。TCP/UDP/QUIC-aware UDP server task 只能通过 `TcpServer::serve`、`UdpServer::serve` 和 `QuicServer::serve` 的单协议入口投递；实现可保留私有 helper 复用 bind 和 worker 投递逻辑，但不得保留公开 listener registry 或公开 listener id 管理面。常规 handler 签名继续不包含 worker id，socket-only serve 回调按其公开契约接收 worker id。`TcpServiceConfig` 和 `UdpServiceConfig` 都不提供 `with_workers` 或 worker 字段；共享 worker 数只能通过 `ServerRuntimeConfig` 设置。
 
 错误类型：
 - `Error::InvalidConfig`
@@ -426,8 +454,8 @@ core 层使用如下内部 trait：
 
 ```rust
 pub(crate) trait PlatformSocketOps {
-    fn bind_tcp(config: &ServiceConfig) -> Result<PlatformTcpBackend, Error>;
-    fn bind_udp(config: &ServiceConfig) -> Result<PlatformUdpBackend, Error>;
+    fn bind_tcp(config: &TcpServiceConfig) -> Result<PlatformTcpBackend, Error>;
+    fn bind_udp(config: &UdpServiceConfig) -> Result<PlatformUdpBackend, Error>;
     fn capabilities() -> PlatformCapabilities;
 }
 ```
@@ -534,8 +562,8 @@ sfo-reuseport
 | FU-DESIGN-021 | testing | 为 `CHG-quic-cid-generator` 增加验证，覆盖默认 CID 长度、固定 2 字节 worker index 前缀、随机部分变化、长度边界、worker index 边界和 crate 根 re-export。 | QUIC CID generator | yes |
 | FU-DESIGN-022 | implementation | 在 `CHG-quic-cid-generator` admission 通过后，新增 `QuicCidGenerator`、`getrandom` 依赖和必要 re-export。 | QUIC CID generator | yes |
 | FU-DESIGN-009 | testing | 为 `CHG-udp-runtime-socket` 增加验证，覆盖 UDP/QUIC handler 接收统一 `UdpSocket`、`BalancedUdpSocket` 不再公开导出、UDP response 仍可通过统一 socket 发送，以及 `UdpServer` 监听 socket 获取规则。 | UDP unified socket callback | yes |
-| FU-DESIGN-023 | implementation | 在 `CHG-server-concurrency-limit` admission 通过后，新增 `ServiceConfig::max_concurrency_per_worker`、每 worker permit helper，并在 TCP/UDP/QUIC handler 型 serve 的 accept/recv 前等待许可，close/drop 唤醒等待者退出。 | server handler concurrency limit | yes |
-| FU-DESIGN-024 | testing | 为 `CHG-server-concurrency-limit` 增加验证，覆盖 `ServiceConfig::max_concurrency_per_worker` API、默认和 0 不限制、每 worker 独立上限、handler 完成释放许可、上限命中不丢弃连接或数据包、关闭唤醒等待 accept/recv，以及 `serve_socket` 不受该限制影响。 | server handler concurrency limit | yes |
+| FU-DESIGN-023 | implementation | 在 `CHG-server-concurrency-limit` admission 通过后，新增 `TcpServiceConfig::max_concurrency_per_worker` 和 `UdpServiceConfig::max_concurrency_per_worker`、每 worker permit helper，并在 TCP/UDP/QUIC handler 型 serve 的 accept/recv 前等待许可，close/drop 唤醒等待者退出。 | server handler concurrency limit | yes |
+| FU-DESIGN-024 | testing | 为 `CHG-server-concurrency-limit` 增加验证，覆盖 `TcpServiceConfig::max_concurrency_per_worker` 和 `UdpServiceConfig::max_concurrency_per_worker` API、默认和 0 不限制、每 worker 独立上限、handler 完成释放许可、上限命中不丢弃连接或数据包、关闭唤醒等待 accept/recv，以及 `serve_socket` 不受该限制影响。 | server handler concurrency limit | yes |
 | FU-DESIGN-017 | testing | 为 `CHG-udp-quic-listener-serve` 增加验证，覆盖 `UdpServer::serve_socket`、`QuicServer::serve_socket` 通过回调交付统一 `UdpSocket` 和 socket 所属 worker id、返回 server 生命周期对象、不调用数据包 handler、应用可自行 `recv_from`，以及 Windows/fallback 不暴露平台内部机制且每个 worker socket 视图只接收自身应收数据。 | UDP/QUIC socket-only serve | yes |
 | FU-DESIGN-018 | testing | 为 `CHG-quinn-udp-socket-compat` 增加验证，覆盖默认 features 下 quinn helper 不可见、启用 `quinn` feature 后 helper 可见、tokio native 和 routed socket 都可通过 helper 非阻塞收发、其他 runtime 组合保持可编译，以及本 crate 不依赖或实现 quinn trait。 | quinn UDP socket adapter helper | yes |
 | FU-DESIGN-019 | implementation | 在 `CHG-quinn-udp-socket-compat` admission 通过后，新增默认关闭的 `quinn` feature，并为统一 `UdpSocket` 实施 feature-gated 非阻塞发送、发送 ready poll、接收 poll 和 vectored 接收 helper。 | quinn UDP socket adapter helper | yes |

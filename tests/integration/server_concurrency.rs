@@ -5,7 +5,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use sfo_reuseport::{
-    QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer, UdpServer,
+    QuicServer, ServerRuntime, ServerRuntimeConfig, TcpServer, TcpServiceConfig, UdpServer,
+    UdpServiceConfig,
 };
 use tokio::sync::Semaphore;
 
@@ -28,7 +29,7 @@ async fn tcp_concurrency_limit_waits_for_per_worker_permit() {
 
     let server = TcpServer::serve(
         &runtime,
-        ServiceConfig::new(addr).with_max_concurrency_per_worker(1),
+        TcpServiceConfig::new(addr).with_max_concurrency_per_worker(1),
         {
             let entered = entered.clone();
             let release = Arc::clone(&release);
@@ -67,7 +68,7 @@ async fn tcp_concurrency_limit_close_exits_waiting_listener() {
 
     let server = TcpServer::serve(
         &runtime,
-        ServiceConfig::new(addr).with_max_concurrency_per_worker(1),
+        TcpServiceConfig::new(addr).with_max_concurrency_per_worker(1),
         {
             let entered = entered.clone();
             let release = Arc::clone(&release);
@@ -105,7 +106,7 @@ async fn udp_concurrency_limit_waits_for_per_worker_permit() {
 
     let server = UdpServer::serve(
         &runtime,
-        ServiceConfig::new(addr).with_max_concurrency_per_worker(1),
+        UdpServiceConfig::new(addr).with_max_concurrency_per_worker(1),
         {
             let entered = entered.clone();
             let release = Arc::clone(&release);
@@ -145,7 +146,7 @@ async fn udp_concurrency_limit_close_exits_waiting_listener() {
 
     let server = UdpServer::serve(
         &runtime,
-        ServiceConfig::new(addr).with_max_concurrency_per_worker(1),
+        UdpServiceConfig::new(addr).with_max_concurrency_per_worker(1),
         {
             let entered = entered.clone();
             let release = Arc::clone(&release);
@@ -184,7 +185,7 @@ async fn quic_concurrency_limit_waits_for_per_worker_permit() {
 
     let server = QuicServer::serve(
         &runtime,
-        ServiceConfig::new(addr).with_max_concurrency_per_worker(1),
+        UdpServiceConfig::new(addr).with_max_concurrency_per_worker(1),
         {
             let entered = entered.clone();
             let release = Arc::clone(&release);
@@ -224,7 +225,7 @@ async fn quic_concurrency_limit_close_exits_waiting_listener() {
 
     let server = QuicServer::serve(
         &runtime,
-        ServiceConfig::new(addr).with_max_concurrency_per_worker(1),
+        UdpServiceConfig::new(addr).with_max_concurrency_per_worker(1),
         {
             let entered = entered.clone();
             let release = Arc::clone(&release);

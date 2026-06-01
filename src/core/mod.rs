@@ -12,9 +12,10 @@ use std::future::Future;
 use std::pin::Pin;
 
 pub use config::{
-    ServerRuntimeConfig, ServiceConfig, SocketInitCallback, SocketOptions, TransparentMode,
-    WorkerCount,
+    DEFAULT_ROUTED_PACKET_CHANNEL_CAPACITY, ServerRuntimeConfig, SocketInitCallback,
+    SocketOptions, TcpServiceConfig, TransparentMode, UdpServiceConfig, WorkerCount,
 };
+pub(crate) use config::SocketConfig;
 pub use cid::QuicCidGenerator;
 pub use error::Error;
 pub use quic::QuicServer;

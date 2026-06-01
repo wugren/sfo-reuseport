@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::core::{
-    ConcurrencyPermit, Error, HandlerFuture, HandlerFutureBox, ServerRuntime, ServiceConfig,
+    ConcurrencyPermit, Error, HandlerFuture, HandlerFutureBox, ServerRuntime, UdpServiceConfig,
     WorkerConcurrencyLimit, linux_reuseport_select,
 };
 use crate::platform;
@@ -60,12 +60,12 @@ type RoutedPacketSender = async_std::channel::Sender<RoutedPacket>;
 type RoutedPacketReceiver = async_std::channel::Receiver<RoutedPacket>;
 
 #[cfg(feature = "runtime-tokio")]
-type RoutedPacketSender = tokio::sync::mpsc::UnboundedSender<RoutedPacket>;
+type RoutedPacketSender = tokio::sync::mpsc::Sender<RoutedPacket>;
 #[cfg(feature = "runtime-tokio")]
-type RoutedPacketReceiver = tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<RoutedPacket>>;
+type RoutedPacketReceiver = tokio::sync::Mutex<tokio::sync::mpsc::Receiver<RoutedPacket>>;
 
 #[cfg(feature = "runtime-tokio-uring")]
-type RoutedPacketSender = std::sync::mpsc::Sender<RoutedPacket>;
+type RoutedPacketSender = std::sync::mpsc::SyncSender<RoutedPacket>;
 #[cfg(feature = "runtime-tokio-uring")]
 type RoutedPacketReceiver = Mutex<std::sync::mpsc::Receiver<RoutedPacket>>;
 
@@ -311,6 +311,7 @@ pub struct UdpServer {
 pub(crate) struct UdpServerState {
     active: Arc<AtomicBool>,
     tasks: Mutex<Vec<runtime::TaskHandle>>,
+    callback_tasks: Mutex<Vec<runtime::TaskHandle>>,
     sockets: Mutex<Vec<StdUdpSocket>>,
     close_sockets: Mutex<Vec<StdUdpSocket>>,
     thread_sockets: Mutex<HashMap<thread::ThreadId, StdUdpSocket>>,
@@ -320,7 +321,7 @@ pub(crate) struct UdpServerState {
 impl UdpServer {
     pub fn serve<F, Fut>(
         runtime: &ServerRuntime,
-        config: ServiceConfig,
+        config: UdpServiceConfig,
         handler: F,
     ) -> Result<Self, Error>
     where
@@ -328,6 +329,7 @@ impl UdpServer {
         Fut: HandlerFuture,
     {
         config.validate()?;
+        config.validate_routed_packet_channel_capacity()?;
         let server = Self {
             state: Arc::new(UdpServerState::new()),
         };
@@ -350,7 +352,7 @@ impl UdpServer {
 
     pub fn serve_socket<F, Fut>(
         runtime: &ServerRuntime,
-        config: ServiceConfig,
+        config: UdpServiceConfig,
         callback: F,
     ) -> Result<Self, Error>
     where
@@ -358,6 +360,7 @@ impl UdpServer {
         Fut: HandlerFuture,
     {
         config.validate()?;
+        config.validate_routed_packet_channel_capacity()?;
         let server = Self {
             state: Arc::new(UdpServerState::new()),
         };
@@ -386,6 +389,7 @@ impl UdpServerState {
         Self {
             active: Arc::new(AtomicBool::new(true)),
             tasks: Mutex::new(Vec::new()),
+            callback_tasks: Mutex::new(Vec::new()),
             sockets: Mutex::new(Vec::new()),
             close_sockets: Mutex::new(Vec::new()),
             thread_sockets: Mutex::new(HashMap::new()),
@@ -413,12 +417,23 @@ impl UdpServerState {
                 task.cancel();
             }
         }
+        if let Ok(mut tasks) = self.callback_tasks.lock() {
+            tasks.clear();
+        }
     }
 
     pub(crate) fn register_task(&self, task: runtime::TaskHandle) -> Result<(), Error> {
         self.tasks
             .lock()
             .map_err(|_| Error::Runtime("udp task registry lock poisoned".to_string()))?
+            .push(task);
+        Ok(())
+    }
+
+    pub(crate) fn register_callback_task(&self, task: runtime::TaskHandle) -> Result<(), Error> {
+        self.callback_tasks
+            .lock()
+            .map_err(|_| Error::Runtime("udp callback task registry lock poisoned".to_string()))?
             .push(task);
         Ok(())
     }
@@ -487,7 +502,7 @@ impl UdpServerState {
 
 fn add_reuse_port_listener<F, Fut>(
     runtime: &ServerRuntime,
-    service_config: ServiceConfig,
+    service_config: UdpServiceConfig,
     handler: F,
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
@@ -531,7 +546,7 @@ where
 
 fn add_socket_callback_reuse_port_listener<F, Fut>(
     runtime: &ServerRuntime,
-    service_config: ServiceConfig,
+    service_config: UdpServiceConfig,
     callback: F,
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
@@ -562,7 +577,7 @@ where
             };
             let _ = callback(socket, worker_id).await;
         })?;
-        state.register_task(task)?;
+        state.register_callback_task(task)?;
     }
 
     Ok(())
@@ -570,7 +585,7 @@ where
 
 fn add_simulated_listener<F, Fut>(
     runtime: &ServerRuntime,
-    service_config: ServiceConfig,
+    service_config: UdpServiceConfig,
     handler: F,
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
@@ -621,7 +636,7 @@ where
 
 pub(crate) fn add_socket_callback_simulated_listener<F, Fut, R>(
     runtime: &ServerRuntime,
-    service_config: ServiceConfig,
+    service_config: UdpServiceConfig,
     callback: F,
     state: Arc<UdpServerState>,
     route_packet: R,
@@ -658,10 +673,11 @@ where
             ));
         }
 
+        let routed_packet_channel_capacity = service_config.routed_packet_channel_capacity();
         let mut senders = Vec::with_capacity(worker_count);
         let callback = socket_callback(callback);
         for worker_id in 0..worker_count {
-            let (sender, receiver) = routed_packet_channel();
+            let (sender, receiver) = routed_packet_channel(routed_packet_channel_capacity);
             senders.push(sender);
             let routed_socket = UdpSocket::from_routed(RoutedUdpSocket {
                 sender: socket.try_clone().map_err(Error::from)?,
@@ -672,7 +688,7 @@ where
             let task = runtime.submit_to_worker(worker_id, move || async move {
                 let _ = callback(routed_socket, worker_id).await;
             })?;
-            state.register_task(task)?;
+            state.register_callback_task(task)?;
         }
 
         let active = state.active_flag();
@@ -771,20 +787,20 @@ async fn dispatch_socket_only_packets<R>(
 }
 
 #[cfg(feature = "runtime-async-std")]
-fn routed_packet_channel() -> (RoutedPacketSender, RoutedPacketReceiver) {
-    async_std::channel::unbounded()
+fn routed_packet_channel(capacity: usize) -> (RoutedPacketSender, RoutedPacketReceiver) {
+    async_std::channel::bounded(capacity)
 }
 
 #[cfg(feature = "runtime-tokio")]
-fn routed_packet_channel() -> (RoutedPacketSender, RoutedPacketReceiver) {
-    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+fn routed_packet_channel(capacity: usize) -> (RoutedPacketSender, RoutedPacketReceiver) {
+    let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
     (sender, tokio::sync::Mutex::new(receiver))
 }
 
 #[cfg(feature = "runtime-tokio-uring")]
 #[allow(dead_code)]
-fn routed_packet_channel() -> (RoutedPacketSender, RoutedPacketReceiver) {
-    let (sender, receiver) = std::sync::mpsc::channel();
+fn routed_packet_channel(capacity: usize) -> (RoutedPacketSender, RoutedPacketReceiver) {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(capacity);
     (sender, Mutex::new(receiver))
 }
 
@@ -801,7 +817,7 @@ async fn send_routed_packet(
     sender: &RoutedPacketSender,
     packet: RoutedPacket,
 ) -> Result<(), ()> {
-    sender.send(packet).map_err(|_| ())
+    sender.send(packet).await.map_err(|_| ())
 }
 
 #[cfg(feature = "runtime-tokio-uring")]
@@ -979,7 +995,8 @@ mod quinn_tests {
 
     #[tokio::test]
     async fn routed_socket_quinn_poll_recv_reads_routed_packet() {
-        let (sender, receiver) = routed_packet_channel();
+        let (sender, receiver) =
+            routed_packet_channel(crate::core::DEFAULT_ROUTED_PACKET_CHANNEL_CAPACITY);
         let sender_socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
         let local_addr = sender_socket.local_addr().unwrap();
         let peer_addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
@@ -1010,7 +1027,8 @@ mod quinn_tests {
 
     #[tokio::test]
     async fn routed_socket_quinn_poll_recv_vectored_scatters_datagram() {
-        let (sender, receiver) = routed_packet_channel();
+        let (sender, receiver) =
+            routed_packet_channel(crate::core::DEFAULT_ROUTED_PACKET_CHANNEL_CAPACITY);
         let sender_socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
         let local_addr = sender_socket.local_addr().unwrap();
         let peer_addr: SocketAddr = "127.0.0.1:12346".parse().unwrap();

@@ -20,7 +20,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 #[cfg(feature = "runtime-tokio")]
 use hyper_util::rt::TokioIo;
-use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer};
+use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, TcpServiceConfig, TcpServer};
 
 #[cfg(feature = "runtime-tokio")]
 type Body = Full<Bytes>;
@@ -47,7 +47,7 @@ async fn run_hyper() -> Result<(), Error> {
     let args = Args::parse()?;
     let root = Arc::new(canonical_root(args.root)?);
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new())?;
-    let config = ServiceConfig::new(args.addr);
+    let config = TcpServiceConfig::new(args.addr);
 
     eprintln!("serving {} at http://{}", root.display(), args.addr);
 
@@ -69,7 +69,7 @@ async fn run_plain() -> Result<(), Error> {
     let args = Args::parse()?;
     let root = Arc::new(canonical_root(args.root)?);
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new())?;
-    let config = ServiceConfig::new(args.addr);
+    let config = TcpServiceConfig::new(args.addr);
 
     eprintln!("serving {} at http://{}", root.display(), args.addr);
 

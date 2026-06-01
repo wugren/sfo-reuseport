@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use sfo_reuseport::{
-    Error, QuicServer, ServerRuntime, ServerRuntimeConfig, ServiceConfig, UdpServer,
+    Error, QuicServer, ServerRuntime, ServerRuntimeConfig, UdpServiceConfig, UdpServer,
 };
 
 fn free_addr() -> std::net::SocketAddr {
@@ -20,7 +20,7 @@ async fn udp_loopback_serve_receives_packet_and_sends_response() {
         let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1))?;
         UdpServer::serve(
             &runtime,
-            ServiceConfig::new(addr),
+            UdpServiceConfig::new(addr),
             |_socket, meta, payload| async move {
                 assert_eq!(payload, b"ping");
                 _socket.send_to(b"pong", meta.peer_addr.unwrap()).await?;
@@ -43,7 +43,7 @@ async fn udp_server_serve_socket_returns_socket_for_application_recv() {
     let addr = free_addr();
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
     let (socket_tx, socket_rx) = mpsc::channel();
-    let server = UdpServer::serve_socket(&runtime, ServiceConfig::new(addr), move |socket, worker_id| {
+    let server = UdpServer::serve_socket(&runtime, UdpServiceConfig::new(addr), move |socket, worker_id| {
         let socket_tx = socket_tx.clone();
         async move {
             socket_tx.send((socket, worker_id)).unwrap();
@@ -74,7 +74,7 @@ async fn quic_server_serve_socket_delivers_quic_routable_packet_to_application_s
     let addr = free_addr();
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
     let (socket_tx, socket_rx) = mpsc::channel();
-    let server = QuicServer::serve_socket(&runtime, ServiceConfig::new(addr), move |socket, worker_id| {
+    let server = QuicServer::serve_socket(&runtime, UdpServiceConfig::new(addr), move |socket, worker_id| {
         let socket_tx = socket_tx.clone();
         async move {
             socket_tx.send((socket, worker_id)).unwrap();
@@ -107,7 +107,7 @@ async fn udp_server_serve_socket_quinn_helpers_recv_and_send_on_native_socket() 
     let addr = free_addr();
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
     let (socket_tx, socket_rx) = mpsc::channel();
-    let server = UdpServer::serve_socket(&runtime, ServiceConfig::new(addr), move |socket, worker_id| {
+    let server = UdpServer::serve_socket(&runtime, UdpServiceConfig::new(addr), move |socket, worker_id| {
         let socket_tx = socket_tx.clone();
         async move {
             socket_tx.send((socket, worker_id)).unwrap();

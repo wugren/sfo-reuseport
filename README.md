@@ -42,14 +42,14 @@ service:
 ```rust
 use std::net::SocketAddr;
 
-use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, ServiceConfig, UdpServer};
+use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, UdpServer, UdpServiceConfig};
 
 async fn run() -> Result<(), Error> {
     let addr: SocketAddr = "127.0.0.1:7001"
         .parse()
         .map_err(|error| Error::InvalidConfig(format!("invalid bind address: {error}")))?;
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(4))?;
-    let config = ServiceConfig::new(addr);
+    let config = UdpServiceConfig::new(addr);
 
     UdpServer::serve(&runtime, config, |socket, meta, payload| async move {
         if let Some(peer_addr) = meta.peer_addr {
@@ -96,7 +96,8 @@ cargo run --example hyper_static -- --root . --addr 127.0.0.1:8080
 Core exports include:
 
 - `ServerRuntime` and `ServerRuntimeConfig`
-- `ServiceConfig`
+- `TcpServiceConfig`
+- `UdpServiceConfig`
 - `TcpServer`
 - `UdpServer`
 - `QuicServer`
@@ -107,8 +108,9 @@ Core exports include:
 - runtime socket types `TcpStream` and `UdpSocket`
 - crate error type `Error`
 
-`ServiceConfig` starts with default socket options and can be customized with
-`with_socket_options` or `with_socket_init_callback`.
+`TcpServiceConfig` and `UdpServiceConfig` start with default socket options and
+can be customized with `with_socket_options` or `with_socket_init_callback`.
+`UdpServiceConfig` also carries UDP/QUIC routed packet channel capacity.
 
 ## Socket Options
 
@@ -122,7 +124,7 @@ transparent binding. IPv4 transparent mode can be configured with:
 Custom socket setup can be injected before common socket options are applied:
 
 ```rust
-let config = ServiceConfig::new(addr).with_socket_init_callback(|socket| {
+let config = UdpServiceConfig::new(addr).with_socket_init_callback(|socket| {
     socket.set_nonblocking(true)?;
     Ok(())
 });

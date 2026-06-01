@@ -1,6 +1,6 @@
 use std::net::UdpSocket;
 
-use crate::core::{Error, ServiceConfig, TransparentMode};
+use crate::core::{Error, SocketConfig, TransparentMode, UdpServiceConfig};
 
 pub(crate) fn set_reuse_port(socket: &socket2::Socket) -> Result<(), Error> {
     super::unix::set_reuse_port(socket)
@@ -8,12 +8,12 @@ pub(crate) fn set_reuse_port(socket: &socket2::Socket) -> Result<(), Error> {
 
 pub(crate) fn apply_transparent(
     _socket: &socket2::Socket,
-    config: &ServiceConfig,
+    config: &impl SocketConfig,
 ) -> Result<(), Error> {
     if matches!(
         (
-            config.socket_options.ipv4_transparent,
-            config.socket_options.ipv6_transparent,
+            config.socket_options().ipv4_transparent,
+            config.socket_options().ipv6_transparent,
         ),
         (TransparentMode::Required, _) | (_, TransparentMode::Required)
     ) {
@@ -26,7 +26,7 @@ pub(crate) fn apply_transparent(
 }
 
 pub(crate) fn bind_quic_udp_reuseport_workers(
-    _config: &ServiceConfig,
+    _config: &UdpServiceConfig,
     _workers: usize,
 ) -> Result<Option<Vec<UdpSocket>>, Error> {
     Ok(None)

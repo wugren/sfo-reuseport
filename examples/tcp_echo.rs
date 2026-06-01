@@ -2,7 +2,7 @@
 use std::net::SocketAddr;
 
 #[cfg(not(feature = "runtime-tokio-uring"))]
-use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, ServiceConfig, TcpServer};
+use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, TcpServiceConfig, TcpServer};
 
 #[cfg(feature = "runtime-tokio-uring")]
 fn main() {}
@@ -25,7 +25,7 @@ async fn run() -> Result<(), Error> {
         .parse()
         .map_err(|error| Error::InvalidConfig(format!("invalid bind address: {error}")))?;
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(4))?;
-    let config = ServiceConfig::new(bind_addr);
+    let config = TcpServiceConfig::new(bind_addr);
 
     TcpServer::serve(&runtime, config, |stream| async move {
         echo_connection(stream).await

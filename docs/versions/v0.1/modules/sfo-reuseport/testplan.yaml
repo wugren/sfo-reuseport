@@ -46,6 +46,10 @@ levels:
         name: TcpServer UdpServer QuicServer 只接受显式 ServerRuntime 的同步 serve 入口并返回 server 对象
         change_ids: ["CHG-server-runtime", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp", "CHG-dynamic-listeners"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: service-config-split-api
+        name: TCP 与 UDP/QUIC service config 公开 API 拆分
+        change_ids: ["CHG-service-config-split", "CHG-routed-packet-channel-limit"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: worker-thread-runtime
         name: 每 worker 独立线程和单线程 async runtime 启动路径
         change_ids: ["CHG-worker-thread-runtime", "CHG-worker-model", "CHG-server-runtime"]
@@ -75,12 +79,16 @@ levels:
         change_ids: ["CHG-socket-options", "CHG-platform-behavior"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: socket-init-callback
-        name: ServiceConfig socket 创建后回调配置和错误映射
+        name: TcpServiceConfig/UdpServiceConfig socket 创建后回调配置和错误映射
         change_ids: ["CHG-socket-init-callback"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: server-concurrency-limit-api
-        name: ServiceConfig 每 worker handler 并发上限 API 契约
+        name: TcpServiceConfig/UdpServiceConfig 每 worker handler 并发上限 API 契约
         change_ids: ["CHG-server-concurrency-limit"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: routed-packet-channel-limit-api
+        name: Windows-only UdpServiceConfig routed packet channel 容量 API 契约
+        change_ids: ["CHG-routed-packet-channel-limit"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: server-runtime-listener-api
         name: ServerRuntime listener 动态管理 API 缺失契约
