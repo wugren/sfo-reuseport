@@ -7,7 +7,7 @@ use std::future::Future;
 use std::io;
 #[cfg(feature = "quinn")]
 use std::io::IoSliceMut;
-use std::net::{Shutdown, SocketAddr, UdpSocket as StdUdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, UdpSocket as StdUdpSocket};
 #[cfg(feature = "quinn")]
 use std::task::{Context, Poll};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -16,7 +16,7 @@ use std::thread;
 
 use crate::core::{
     ConcurrencyPermit, Error, HandlerFuture, HandlerFutureBox, ServerRuntime, UdpServiceConfig,
-    WorkerConcurrencyLimit, linux_reuseport_select,
+    TransparentMode, WorkerConcurrencyLimit, linux_reuseport_select,
 };
 use crate::platform;
 use crate::runtime;
@@ -154,7 +154,10 @@ impl UdpSocket {
 
     /// Receives into an owned buffer without copying on runtimes that can
     /// take ownership of the buffer, such as tokio-uring.
-    pub async fn recv_from_vec(&self, buffer: Vec<u8>) -> Result<(usize, SocketAddr, Vec<u8>), Error> {
+    pub async fn recv_from_vec(
+        &self,
+        buffer: Vec<u8>,
+    ) -> Result<(usize, SocketAddr, Vec<u8>), Error> {
         match &self.inner {
             UdpSocketInner::Runtime(socket) => runtime::udp_recv_from(socket, buffer)
                 .await
@@ -162,6 +165,39 @@ impl UdpSocket {
             UdpSocketInner::Routed(socket) => socket.recv_from_vec(buffer).await.map_err(Error::from),
         }
     }
+
+
+    async fn recv_packet_with_local_addr(
+        &self,
+        buffer: Vec<u8>,
+        transparent_receive: bool,
+    ) -> Result<(usize, SocketAddr, SocketAddr, Vec<u8>), Error> {
+        match &self.inner {
+            UdpSocketInner::Runtime(socket) if transparent_receive => {
+                let fallback_local_addr = self.local_addr()?;
+                platform::recv_udp_original_dst(socket, buffer, fallback_local_addr)
+                    .await
+                    .map_err(Error::from)
+            }
+            _ => {
+                let (len, peer_addr, buffer) = self.recv_from_vec(buffer).await?;
+                let local_addr = self.local_addr()?;
+                Ok((len, peer_addr, local_addr, buffer))
+            }
+        }
+    }
+}
+
+fn uses_transparent_receive(config: &UdpServiceConfig) -> bool {
+    cfg!(all(target_os = "linux", feature = "runtime-tokio"))
+        && matches!(
+            (
+                config.socket_options.ipv4_transparent,
+                config.socket_options.ipv6_transparent,
+            ),
+            (TransparentMode::Required | TransparentMode::BestEffort, _)
+                | (_, TransparentMode::Required | TransparentMode::BestEffort)
+        )
 }
 
 impl RoutedUdpSocket {
@@ -333,7 +369,7 @@ impl UdpServer {
         let server = Self {
             state: Arc::new(UdpServerState::new()),
         };
-        if !platform::supports_reuse_port_balancing() {
+        if !platform::capabilities().reuse_port_balancing {
             add_simulated_listener(runtime, config, handler, Arc::clone(&server.state))?;
         } else {
             add_reuse_port_listener(runtime, config, handler, Arc::clone(&server.state))?;
@@ -364,7 +400,7 @@ impl UdpServer {
         let server = Self {
             state: Arc::new(UdpServerState::new()),
         };
-        if !platform::supports_reuse_port_balancing() {
+        if !platform::capabilities().reuse_port_balancing {
             add_socket_callback_simulated_listener(
                 runtime,
                 config,
@@ -400,11 +436,17 @@ impl UdpServerState {
     pub(crate) fn close(&self) {
         self.active.store(false, Ordering::SeqCst);
         if let Ok(mut sockets) = self.sockets.lock() {
+            for socket in sockets.iter() {
+                wake_udp_socket(socket);
+            }
             for socket in sockets.drain(..) {
                 let _ = socket2::SockRef::from(&socket).shutdown(Shutdown::Both);
             }
         }
         if let Ok(mut sockets) = self.close_sockets.lock() {
+            for socket in sockets.iter() {
+                wake_udp_socket(socket);
+            }
             for socket in sockets.drain(..) {
                 let _ = socket2::SockRef::from(&socket).shutdown(Shutdown::Both);
             }
@@ -518,6 +560,7 @@ where
     }
     let runtime_active = runtime.active_flag();
     let max_concurrency = service_config.max_concurrency_per_worker;
+    let transparent_receive = uses_transparent_receive(&service_config);
 
     let handler = udp_handler(handler);
     for (worker_id, socket) in sockets.into_iter().enumerate() {
@@ -536,7 +579,15 @@ where
             else {
                 return;
             };
-            udp_listener_loop(socket, runtime_active, server_active, handler, limit).await;
+            udp_listener_loop(
+                socket,
+                runtime_active,
+                server_active,
+                handler,
+                limit,
+                transparent_receive,
+            )
+            .await;
         })?;
         state.register_task(task)?;
     }
@@ -602,6 +653,7 @@ where
     let socket = platform::bind_udp(&service_config)?;
     let runtime_active = runtime.active_flag();
     let server_active = state.active_flag();
+    let transparent_receive = uses_transparent_receive(&service_config);
 
     let worker_executors = runtime.worker_executors();
     let worker_count = worker_executors.len();
@@ -626,6 +678,7 @@ where
             worker_count,
             handler,
             limits,
+            transparent_receive,
         )
         .await;
     })?;
@@ -663,6 +716,7 @@ where
         }
 
         let socket = platform::bind_udp(&service_config)?;
+        let transparent_receive = uses_transparent_receive(&service_config);
         state.register_close_socket(&socket)?;
 
         let local_addr = socket.local_addr().map_err(Error::from)?;
@@ -706,6 +760,7 @@ where
                 route_packet,
                 active,
                 senders,
+                transparent_receive,
             )
             .await;
         })?;
@@ -740,17 +795,21 @@ where
 #[allow(dead_code)]
 async fn dispatch_socket_only_packets<R>(
     socket: UdpSocket,
-    local_addr: SocketAddr,
+    fallback_local_addr: SocketAddr,
     worker_count: usize,
     route_packet: R,
     active: Arc<AtomicBool>,
     senders: Vec<RoutedPacketSender>,
+    transparent_receive: bool,
 ) where
     R: Fn(&[u8], PacketMeta, usize) -> Option<usize>,
 {
     let mut buffer = vec![0_u8; 65_536];
     while active.load(Ordering::SeqCst) {
-        let (len, peer_addr, returned_buffer) = match socket.recv_from_vec(buffer).await {
+        let (len, peer_addr, local_addr, returned_buffer) = match socket
+            .recv_packet_with_local_addr(buffer, transparent_receive)
+            .await
+        {
             Ok(result) => result,
             Err(_) => {
                 if active.load(Ordering::SeqCst) {
@@ -763,7 +822,7 @@ async fn dispatch_socket_only_packets<R>(
         buffer = returned_buffer;
         let meta = PacketMeta {
             peer_addr: Some(peer_addr),
-            local_addr: Some(local_addr),
+            local_addr: Some(if transparent_receive { local_addr } else { fallback_local_addr }),
         };
         let Some(worker_id) = route_packet(&buffer[..len], meta, worker_count) else {
             continue;
@@ -834,6 +893,7 @@ async fn udp_listener_loop(
     server_active: Arc<AtomicBool>,
     handler: UdpHandler,
     limit: WorkerConcurrencyLimit,
+    transparent_receive: bool,
 ) {
     let mut buffer = vec![0_u8; 65_536];
     while is_active(&runtime_active, &server_active) {
@@ -841,7 +901,10 @@ async fn udp_listener_loop(
         if !is_active(&runtime_active, &server_active) {
             break;
         }
-        let (len, peer_addr, returned_buffer) = match socket.recv_from_vec(buffer).await {
+        let (len, peer_addr, local_addr, returned_buffer) = match socket
+            .recv_packet_with_local_addr(buffer, transparent_receive)
+            .await
+        {
             Ok(result) => result,
             Err(_) => {
                 if is_active(&runtime_active, &server_active) {
@@ -857,7 +920,7 @@ async fn udp_listener_loop(
         }
         let meta = PacketMeta {
             peer_addr: Some(peer_addr),
-            local_addr: socket.local_addr().ok(),
+            local_addr: Some(local_addr),
         };
         if spawn_udp_handler(
             socket.clone(),
@@ -881,10 +944,14 @@ async fn simulated_udp_listener_loop(
     worker_count: usize,
     handler: UdpHandler,
     limits: Vec<WorkerConcurrencyLimit>,
+    transparent_receive: bool,
 ) {
     let mut buffer = vec![0_u8; 65_536];
     while is_active(&runtime_active, &server_active) {
-        let (len, peer_addr, returned_buffer) = match socket.recv_from_vec(buffer).await {
+        let (len, peer_addr, local_addr, returned_buffer) = match socket
+            .recv_packet_with_local_addr(buffer, transparent_receive)
+            .await
+        {
             Ok(result) => result,
             Err(_) => {
                 if is_active(&runtime_active, &server_active) {
@@ -900,7 +967,7 @@ async fn simulated_udp_listener_loop(
         }
         let meta = PacketMeta {
             peer_addr: Some(peer_addr),
-            local_addr: socket.local_addr().ok(),
+            local_addr: Some(local_addr),
         };
         let Ok(worker_id) = linux_reuseport_select(meta, worker_count) else {
             break;
@@ -933,6 +1000,28 @@ fn current_time_seed() -> usize {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.subsec_nanos() as usize)
         .unwrap_or(0)
+}
+
+fn wake_udp_socket(socket: &StdUdpSocket) {
+    let Ok(local_addr) = socket.local_addr() else {
+        return;
+    };
+    let target = match local_addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local_addr.port())
+        }
+        IpAddr::V6(ip) if ip.is_unspecified() => {
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), local_addr.port())
+        }
+        _ => local_addr,
+    };
+    let bind_addr = match target {
+        SocketAddr::V4(_) => "127.0.0.1:0",
+        SocketAddr::V6(_) => "[::1]:0",
+    };
+    if let Ok(sender) = StdUdpSocket::bind(bind_addr) {
+        let _ = sender.send_to(&[0], target);
+    }
 }
 
 pub(crate) async fn submit_udp_handler(

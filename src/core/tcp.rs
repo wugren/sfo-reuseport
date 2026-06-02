@@ -34,7 +34,7 @@ impl TcpServer {
         let server = Self {
             state: Arc::new(TcpServerState::new()),
         };
-        if !platform::supports_reuse_port_balancing() {
+        if !platform::capabilities().reuse_port_balancing {
             add_simulated_listener(runtime, config, handler, Arc::clone(&server.state))?;
         } else {
             add_reuse_port_listener(runtime, config, handler, Arc::clone(&server.state))?;

@@ -4,7 +4,7 @@ submodule:
 version: v0.1
 status: approved
 approved_by: user-request
-approved_at: 2026-06-01
+approved_at: 2026-06-02T01:17:59+08:00
 ---
 
 # sfo-reuseport 提案
@@ -24,6 +24,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - UDP worker 服务：每个收到的数据包都通过 async 用户回调交付，回调参数包含 crate 公开的统一 `UdpSocket` 抽象以及由后续设计定义的数据包数据/来源元信息，但不包含 `worker_id`。
 - 提供名为 `UdpSocket` 的跨平台公开抽象，用于统一 Linux 原生监听 socket、Windows 或其他 fallback 平台的模拟/代理 socket 行为，以及不同 runtime feature 下的 UDP I/O 表面；不提供 `BalancedUdpSocket` 公开类型，并由实现保持 balancer 必需的 bind/reuse-port 状态不被公开配置覆盖。
 - 对 Linux、macOS、FreeBSD 和 Windows 提供跨平台行为，平台差异不暴露到公开 API。
+- `src/platform/` 下每个平台模块只承载该目标平台相关的 socket 行为、能力探测、错误转换和 fallback 接入；所有平台模块必须实现并导出同一套平台接口形态，供上层 `core`/runtime 逻辑通过统一接口调用，禁止上层按具体平台模块分支依赖不同函数、类型或导出集合。
 - 不提供公开可配置 Dispatcher 或分发策略；所有需要用户态模拟的系统必须使用与 Linux `SO_REUSEPORT` 语义一致的内部调度算法。
 - 支持配置 worker 数量，默认使用 `num_cpus::get()`。
 - worker 数量属于 `ServerRuntime` 级别配置；所有投递到同一 `ServerRuntime` 的 TCP/UDP/QUIC server task 必须共享同一套 worker，不在每个 server config 中单独设置 worker 数量。
@@ -119,6 +120,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - 默认 features 不启用 quinn 适配接口；启用 `quinn` feature 不得改变现有 `UdpSocket` 默认 I/O 表面、server 生命周期或 worker 分配语义。
   - 不要求用户协议代码按 Linux、macOS、FreeBSD 或 Windows 分支。
   - 除 crate feature 选择外，不要求用户协议代码按 tokio、async-std 或 tokio-uring 分支。
+  - 不允许 `src/platform/` 的某个平台模块导出额外的上层依赖入口来绕过统一平台接口；平台私有 helper 必须保持模块内部私有或仅由该平台模块自身组合使用。
   - 不在均衡层实现协议特定状态机；`QuicServer` 仅允许实现足够的 QUIC header 路由字段读取和 worker 选择。
   - 不在 package 元数据中声明超出 crate 实际能力的协议栈、生产级静态文件服务、TLS 或完整 QUIC server 能力。
 - 系统约束：
@@ -126,6 +128,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - macOS 和 FreeBSD 使用原生 `SO_REUSEPORT`；当目标系统不能提供可用的 `SO_REUSEPORT` worker 分配能力时，回退到 Linux 兼容的内部用户态调度。
   - Windows 使用 Linux 兼容的内部用户态调度模拟，同时保持公开 API 行为一致。
   - 公开的 runtime-specific TCP stream 类型必须对应所选择的 runtime feature；公开 `UdpSocket` 抽象必须在各 runtime feature 下提供一致的 UDP I/O 表面并隐藏平台差异。
+  - 上层实现只能依赖平台层统一导出的接口集合运行；新增或修改任一平台后端时，其他平台后端必须保持同名、同语义、同错误边界的接口形态，平台特有能力通过统一能力结果或统一错误表达，不通过不同导出面泄漏。
 
 ## 大模块子模块决策
 | 子模块 | 新建或既有 | 职责 | 提案包 | 原因 |
@@ -161,7 +164,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | P-udp | CHG-udp-runtime-socket | 通过 crate 公开的统一 `UdpSocket` 抽象提供 UDP 数据包服务。 | 同步 `UdpServer::serve(runtime: &ServerRuntime, config: UdpServiceConfig, handler: F) -> Result<UdpServer, Error>`、UDP receive/send API 表面、统一 `UdpSocket` 回调交付、`UdpServer` 关闭方法、监听 socket 获取方法；不提供 `BalancedUdpSocket` 公开类型。 | 测试或可运行验证展示数据包到达回调，handler 接收 crate 公开的统一 `UdpSocket`，公开 API 不导出 `BalancedUdpSocket`，API 编译覆盖确认 `UdpServer` 只有一个同步 `serve` 入口且必须传入 `&ServerRuntime`，方法内部不使用 `pending` 挂起，返回 `UdpServer` 可显式关闭 UDP server task，并可按本线程优先、否则随机的规则获取监听 socket。 | 不提供 `BalancedUdpSocket` 封装类型；不要求 UDP 公开类型直接等于各 runtime 或平台的原生 socket 类型；不提供无 runtime 参数的 UDP serve 入口；不允许通过 socket 选项配置覆盖 balancer 必需的内部 bind/reuse-port 状态；不把 `serve` 做成异步 lifecycle future。 |
 | P-udp-quic-listener-serve | CHG-udp-quic-listener-serve | `UdpServer` 和 `QuicServer` 提供只创建监听 socket 并通过回调交付 socket 的 serve 入口，让应用自行读取 UDP 数据；回调必须携带 socket 所属 worker id。 | `UdpServer`/`QuicServer` 的 socket-only serve API、监听 socket 创建、统一 `UdpSocket` 和 worker id 回调交付、关闭或资源释放边界，以及不调用数据包 handler 的行为契约；支持 `SO_REUSEPORT` worker socket 的系统上，每个 worker socket 都必须在对应监听线程回调交付；不支持 `SO_REUSEPORT` worker socket 的系统也必须使用同一回调形态交付可用监听 socket，并保证每个 worker 回调收到的 socket 只能接收按内部调度属于该 worker 的数据。 | API 编译覆盖证明 socket-only serve 入口必须显式传入 `&ServerRuntime`、`UdpServiceConfig` 和 socket 回调，并通过回调接收 crate 公开的统一监听 `UdpSocket` 与 socket 所属 worker id；运行期验证该入口在 `SO_REUSEPORT` 路径按 worker 监听线程交付 socket 和对应 worker id，在 fallback 路径使用相同回调形态交付 socket 与 worker id 且每个 socket 只接收对应 worker 应收数据，不触发数据包 handler，应用可以自行从回调获得的 socket 接收数据。 | 不为 TCP 增加同类 socket-only serve 入口；不在该入口中实现公开可配置 UDP packet 分发、公开可配置 QUIC 路由、数据包 handler 调用或协议处理；不暴露平台差异或 Windows fallback 内部机制；不提供无 runtime 参数入口；不向常规 UDP/QUIC packet handler 传递 worker id。 |
 | P-linux-compatible-scheduling | CHG-linux-compatible-scheduling | 移除公开 Dispatcher/DispatchPolicy 逻辑；没有可用 `SO_REUSEPORT` worker 分配能力的系统使用与 Linux `SO_REUSEPORT` 语义一致的内部调度算法。 | 内部 worker 选择、非 `SO_REUSEPORT` 平台模拟路径、TCP/UDP 元信息到调度输入的映射；公开 API 不暴露策略配置或自定义分发回调。 | 测试展示非 `SO_REUSEPORT` fallback 路径与 Linux 兼容调度结果一致，且公开 API 不导出 Dispatcher/DispatchPolicy 或 `Auto`、`RoundRobin`、`SrcHash`、`Custom` 策略。 | v0.1 不提供可配置、load-aware、adaptive 或用户自定义 scheduler。 |
-| P-platform | CHG-platform-behavior | 用相同 API 屏蔽 Linux、macOS、FreeBSD 和 Windows socket 行为差异。 | 平台特定 socket 设置和 Windows 模拟路径。 | 平台 gated 编译检查或文档化验证覆盖每类支持平台。 | 不提供公开的平台特定 API 变体。 |
+| P-platform | CHG-platform-behavior | 用相同 API 屏蔽 Linux、macOS、FreeBSD 和 Windows socket 行为差异，并要求 `src/platform/` 下各平台模块只包含自身平台相关逻辑且导出同一套平台接口形态。 | 平台特定 socket 设置、能力探测、错误转换、Windows 或其他 fallback 模拟路径、统一平台接口 trait/函数集合、各 cfg-gated 平台模块的 re-export 边界，以及上层 `core`/runtime 只依赖统一平台接口的调用边界。 | 平台 gated 编译检查或文档化验证覆盖每类支持平台；接口检查证明每个平台模块提供同名、同语义、同错误边界的统一平台导出集合；代码审查证明上层实现不直接依赖某个平台模块的私有函数、私有类型或额外导出入口。 | 不提供公开的平台特定 API 变体；不允许上层业务逻辑绕过统一平台接口调用某个具体平台模块；不要求所有平台支持同等内核能力，能力差异必须通过统一 capability/unsupported/error 语义表达。 |
 | P-socket-options | CHG-socket-options | 提供受控且可扩展的 socket 选项配置，至少支持 `reuse_address` 与 IPv4/IPv6 transparent 相关设置。 | TCP/UDP bind 前 socket 选项配置、平台能力表达、错误语义和与 balancer 内部状态的冲突处理。 | 测试或文档化验证展示支持的选项被应用，不支持或无权限的选项产生明确错误，且调用方不能通过选项破坏 balancer 状态。 | 不提供任意 raw fd/raw socket 访问，不把未设计的系统 socket 选项承诺为稳定 API。 |
 | P-socket-init-callback | CHG-socket-init-callback | `TcpServiceConfig` 和 `UdpServiceConfig` 提供默认 `None` 的 socket 创建后回调；socket 创建完成后、bind/listen 或 runtime 转换前调用该回调，使调用方可设置额外 socket 参数。 | `TcpServiceConfig`/`UdpServiceConfig` 配置表面、TCP/UDP socket 创建路径、回调错误传播，以及与内部必需 socket 状态的冲突边界。 | 测试展示默认 `None` 不改变现有行为；配置回调时 TCP/UDP socket 创建路径都会调用它；回调返回错误会阻止服务启动并保留错误信息。 | 不允许回调接管或替换 socket，不允许在回调返回后继续修改 balancer 拥有的 socket 状态，不承诺任意平台私有选项跨平台可用。 |
 | P-dynamic-listeners | CHG-dynamic-listeners | 支持通过 `serve` 把 TCP/UDP/QUIC-aware UDP server task 投递到 `ServerRuntime` worker 线程，并通过 `serve` 返回的 server 对象显式关闭该 task。 | server task 生命周期、公开 server 对象 API 表面、runtime drop 停止边界、worker 投递状态、server 对象关闭后 socket/task 停止边界。 | API 编译覆盖证明 `TcpServer::serve`、`UdpServer::serve` 和 `QuicServer::serve` 分别返回 `TcpServer`、`UdpServer` 和 `QuicServer` 对象且对象可关闭；运行期验证关闭单个 TCP/UDP/QUIC server 对象后该 task 停止接收新工作，其他 server task 和已交付 handler future 不被强制取消。 | 不提供 `add_tcp_listener`、`add_udp_listener` 或 `add_quic_listener` 并列入口；不提供配置文件热加载或外部配置订阅；不强制取消已经交付给用户回调的工作。 |
@@ -194,6 +197,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - `TcpServer`、`UdpServer` 和 `QuicServer` 各自只暴露一个同步 `serve` 方法，签名必须接受 `runtime: &ServerRuntime` 和对应 typed service config 和对应 handler；公开 API 不保留 `serve_with_runtime` 或隐式默认 runtime 入口，且 `serve` 内部不通过 `pending` 或等价 future 阻塞调用方，返回值必须分别是可显式关闭的 `TcpServer`、`UdpServer` 或 `QuicServer` 对象。
   - 每个 worker 在独立 OS 线程内运行单线程 async runtime；实现不得依赖调用方当前 runtime 的多线程调度来代表 worker。
   - 平台差异不出现在公开 API 中；公开 API 不包含 Dispatcher/DispatchPolicy 或可配置调度策略。
+  - `src/platform/` 下每个平台模块只包含对应目标平台的 socket 行为和 fallback 接入，且 Linux、macOS、FreeBSD、Windows 等平台后端向上层提供同一套平台接口形态；上层 `core`/runtime 实现不直接依赖具体平台模块的额外导出。
 - 必需证据：
   - 实现前，approved `proposal.md` 和 `design.md` 都直接映射相关 `change_id`，并通过 schema/admission 检查。
   - 实现后，测试阶段通过生成或更新测试实现、可选 `testing.md`、可选 `testplan.yaml`，覆盖 runtime feature gating、tokio-uring 公开接口可用性、统一 `UdpSocket` 跨平台 API、worker 行为、TCP 服务、UDP 服务、UDP/QUIC socket-only serve 入口、QUIC-aware UDP 包分配、serve 返回 server 对象的显式关闭能力、TCP/UDP/QUIC 常规 handler 并发数限制、UDP/QUIC server 对象获取监听 socket 能力、混合协议 worker、Linux 兼容内部调度、socket 选项配置和平台特定编译验证。
@@ -220,6 +224,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - Linux 高性能 reuse-port 路径若依赖 eBPF/CBPF，权限、内核版本、加载失败和非 Linux fallback 行为必须被设计和测试明确覆盖。
 - 如果 `quinn` feature 的接口过于贴近某个 quinn 版本，可能造成不必要的上层版本耦合；proposal 要求接口使用本 crate 自有类型和标准库类型，仅让用户适配层承担 quinn 版本差异。
 - 如果 routed packet channel 容量和满队列语义定义不足，fallback 路径可能在高负载下继续无界占用内存，或在容量命中时出现不可预测的丢包、阻塞或关闭行为。
+- 如果各平台模块的导出接口发生分叉，上层 `core`/runtime 容易重新引入平台分支并破坏跨平台 API 一致性；设计和实现必须把平台私有能力收敛到统一接口、capability 或 unsupported/error 语义中。
 
 ## 触发器记录
 | Trigger Category | Applies? | Evidence | Required Checks | Completed Checks | Deferred Checks and Reason | Residual Risk |
@@ -244,6 +249,9 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | FU-002 | testing | 为所有提案 `change_id` 增加直接验证覆盖和 `testplan.yaml` 条目。 | P-runtime/P-workers/P-tcp/P-udp/P-linux-compatible-scheduling/P-platform | yes |
 | FU-003 | implementation | 仅在 proposal 和 design 均 approved、schema-check 通过，并且每个相关 `change_id` 的 admission-check 通过后实施；测试实现与测试元数据归属后续 testing 阶段。 | P-runtime/P-workers/P-tcp/P-udp/P-linux-compatible-scheduling/P-platform | yes |
 | FU-004 | acceptance | 实现后审计文档、实现和验证之间的一致性。 | P-runtime/P-workers/P-tcp/P-udp/P-linux-compatible-scheduling/P-platform | yes |
+| FU-064 | design | 定义 `src/platform/` 统一平台接口形态、每个平台模块的同名导出集合、平台私有 helper 的可见性边界、能力差异的统一 capability/unsupported/error 表达，以及上层 `core`/runtime 只能依赖该接口的调用边界。 | P-platform/P-linux-compatible-scheduling/P-socket-options/P-udp/P-quic-routed-udp | yes |
+| FU-065 | testing | 增加平台接口一致性验证，覆盖各 cfg-gated 平台模块导出同一套接口形态、上层不直接依赖具体平台模块额外入口、平台特有能力通过统一错误或 capability 表达，以及 supported/fallback 平台编译检查。 | P-platform | yes |
+| FU-066 | implementation | 仅在 design 重新批准且 `CHG-platform-behavior` 实现准入通过后，收敛 `src/platform/` 各平台模块到相同导出接口，并移除上层对具体平台模块额外入口的依赖；相关测试代码和测试元数据在后续 testing 阶段同步。 | P-platform | yes |
 | FU-005 | design | 将 TCP/UDP/QUIC 常规数据处理回调签名同步为不含 worker id，将 `UdpServer::serve_socket` 和 `QuicServer::serve_socket` 的 socket-only 回调同步为接收统一 `UdpSocket` 与 socket 所属 worker id，并将 UDP handler 参数从 `BalancedUdpSocket` 改为 crate 公开的统一 `UdpSocket` 抽象。 | P-workers/P-tcp/P-udp/P-udp-quic-listener-serve | yes |
 | FU-006 | testing | 增加公开常规数据处理回调签名不含 worker id、socket-only serve 回调包含 worker id、公开 API 不导出 `BalancedUdpSocket`、UDP handler 接收统一 `UdpSocket` 的编译期断言。 | P-workers/P-tcp/P-udp/P-udp-quic-listener-serve | yes |
 | FU-027 | design | 移除 `BalancedUdpSocket` 公开类型设计，更新 `UdpSocket` 统一抽象、`UdpServer`、`QuicServer` 回调签名、re-export 列表、UDP send/response 边界和 balancer socket 状态保护说明。 | P-udp/P-quic-routed-udp/P-runtime | yes |

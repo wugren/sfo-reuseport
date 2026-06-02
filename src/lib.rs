@@ -24,7 +24,7 @@ compile_error!("feature `runtime-tokio-uring` is only supported on Linux targets
 #[cfg(not(all(feature = "runtime-tokio-uring", not(target_os = "linux"))))]
 pub mod core;
 #[cfg(not(all(feature = "runtime-tokio-uring", not(target_os = "linux"))))]
-pub mod platform;
+pub(crate) mod platform;
 #[cfg(not(all(feature = "runtime-tokio-uring", not(target_os = "linux"))))]
 pub mod runtime;
 

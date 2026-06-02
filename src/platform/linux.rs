@@ -1,8 +1,10 @@
 use std::io;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use crate::core::{Error, SocketConfig, TransparentMode, UdpServiceConfig};
+use crate::runtime;
 
 pub(crate) fn set_reuse_port(socket: &socket2::Socket) -> Result<(), Error> {
     super::unix::set_reuse_port(socket)
@@ -28,9 +30,16 @@ fn apply_ipv4_transparent(socket: &socket2::Socket, config: &impl SocketConfig) 
         ),
         TransparentMode::BestEffort => {
             let _ = socket.set_ip_transparent_v4(true);
+            let _ = set_socket_opt_int(socket, libc::SOL_IP, libc::IP_ORIGDSTADDR, 1);
+            let _ = set_socket_opt_int(socket, libc::SOL_IP, libc::IP_FREEBIND, 1);
             Ok(())
         }
-        TransparentMode::Required => socket.set_ip_transparent_v4(true).map_err(Error::from),
+        TransparentMode::Required => {
+            socket.set_ip_transparent_v4(true).map_err(Error::from)?;
+            set_socket_opt_int(socket, libc::SOL_IP, libc::IP_ORIGDSTADDR, 1)
+                .map_err(Error::from)?;
+            set_socket_opt_int(socket, libc::SOL_IP, libc::IP_FREEBIND, 1).map_err(Error::from)
+        }
     }
 }
 
@@ -45,9 +54,158 @@ fn apply_ipv6_transparent(socket: &socket2::Socket, config: &impl SocketConfig) 
         ),
         TransparentMode::BestEffort => {
             let _ = socket.set_ip_transparent_v6(true);
+            let _ = set_socket_opt_int(socket, libc::SOL_IPV6, libc::IPV6_RECVORIGDSTADDR, 1);
+            let _ = set_socket_opt_int(socket, libc::SOL_IPV6, libc::IPV6_FREEBIND, 1);
             Ok(())
         }
-        TransparentMode::Required => socket.set_ip_transparent_v6(true).map_err(Error::from),
+        TransparentMode::Required => {
+            socket.set_ip_transparent_v6(true).map_err(Error::from)?;
+            set_socket_opt_int(socket, libc::SOL_IPV6, libc::IPV6_RECVORIGDSTADDR, 1)
+                .map_err(Error::from)?;
+            set_socket_opt_int(socket, libc::SOL_IPV6, libc::IPV6_FREEBIND, 1).map_err(Error::from)
+        }
+    }
+}
+
+#[allow(unsafe_code)]
+fn set_socket_opt_int<T: AsRawFd>(
+    socket: &T,
+    level: libc::c_int,
+    name: libc::c_int,
+    value: libc::c_int,
+) -> io::Result<()> {
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            level,
+            name,
+            (&value as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "runtime-tokio"))]
+pub(crate) async fn recv_udp_original_dst(
+    socket: &runtime::UdpSocket,
+    mut buffer: Vec<u8>,
+    fallback_local_addr: SocketAddr,
+) -> io::Result<(usize, SocketAddr, SocketAddr, Vec<u8>)> {
+    let (len, peer_addr, local_addr) = socket
+        .async_io(tokio::io::Interest::READABLE, || {
+            recv_udp_original_dst_raw(socket.as_ref(), buffer.as_mut_slice(), fallback_local_addr)
+        })
+        .await?;
+    Ok((len, peer_addr, local_addr, buffer))
+}
+
+#[cfg(not(all(target_os = "linux", feature = "runtime-tokio")))]
+pub(crate) async fn recv_udp_original_dst(
+    _socket: &runtime::UdpSocket,
+    _buffer: Vec<u8>,
+    _fallback_local_addr: SocketAddr,
+) -> io::Result<(usize, SocketAddr, SocketAddr, Vec<u8>)> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "UDP original destination receive is unsupported by the selected platform or runtime",
+    ))
+}
+
+#[cfg(all(target_os = "linux", feature = "runtime-tokio"))]
+#[allow(unsafe_code)]
+fn recv_udp_original_dst_raw<T: AsRawFd>(
+    socket: &T,
+    buffer: &mut [u8],
+    fallback_local_addr: SocketAddr,
+) -> io::Result<(usize, SocketAddr, SocketAddr)> {
+    unsafe {
+        let mut control = [0_u8; 128];
+        let mut source: libc::sockaddr_storage = std::mem::zeroed();
+        let mut iov = libc::iovec {
+            iov_base: buffer.as_mut_ptr().cast(),
+            iov_len: buffer.len(),
+        };
+        let mut message: libc::msghdr = std::mem::zeroed();
+        message.msg_name = (&mut source as *mut libc::sockaddr_storage).cast();
+        message.msg_namelen = std::mem::size_of_val(&source) as libc::socklen_t;
+        message.msg_iov = &mut iov;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast();
+        message.msg_controllen = control.len();
+
+        let len = libc::recvmsg(socket.as_raw_fd(), &mut message, 0);
+        if len < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let destination = match original_destination_addr(&message) {
+            Some(destination) => sockaddr_storage_to_socket_addr(&destination)?,
+            None => fallback_local_addr,
+        };
+
+        Ok((
+            len as usize,
+            sockaddr_storage_to_socket_addr(&source)?,
+            destination,
+        ))
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "runtime-tokio"))]
+#[allow(unsafe_code)]
+unsafe fn original_destination_addr(message: &libc::msghdr) -> Option<libc::sockaddr_storage> {
+    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(message) };
+    while !cmsg.is_null() {
+        let header = unsafe { &*cmsg };
+        let copy_len = match (header.cmsg_level, header.cmsg_type) {
+            (libc::SOL_IP, libc::IP_ORIGDSTADDR) => std::mem::size_of::<libc::sockaddr_in>(),
+            (libc::SOL_IPV6, libc::IPV6_RECVORIGDSTADDR) => {
+                std::mem::size_of::<libc::sockaddr_in6>()
+            }
+            _ => {
+                cmsg = unsafe { libc::CMSG_NXTHDR(message, cmsg) };
+                continue;
+            }
+        };
+
+        let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                libc::CMSG_DATA(cmsg),
+                (&mut addr as *mut libc::sockaddr_storage).cast(),
+                copy_len,
+            );
+        }
+        return Some(addr);
+    }
+    None
+}
+
+#[cfg(all(target_os = "linux", feature = "runtime-tokio"))]
+#[allow(unsafe_code)]
+fn sockaddr_storage_to_socket_addr(addr: &libc::sockaddr_storage) -> io::Result<SocketAddr> {
+    match i32::from(addr.ss_family) {
+        libc::AF_INET => {
+            let addr =
+                unsafe { &*(addr as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
+            let ip = IpAddr::from(addr.sin_addr.s_addr.to_ne_bytes());
+            Ok(SocketAddr::new(ip, u16::from_be(addr.sin_port)))
+        }
+        libc::AF_INET6 => {
+            let addr =
+                unsafe { &*(addr as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>() };
+            let ip = IpAddr::from(addr.sin6_addr.s6_addr);
+            Ok(SocketAddr::new(ip, u16::from_be(addr.sin6_port)))
+        }
+        family => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported socket address family {family}"),
+        )),
     }
 }
 

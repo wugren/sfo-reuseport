@@ -4,7 +4,7 @@ submodule:
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-06-01T00:00:00+08:00
+approved_at: 2026-06-02T01:17:59+08:00
 ---
 
 # sfo-reuseport 设计
@@ -19,6 +19,7 @@ approved_at: 2026-06-01T00:00:00+08:00
   - 异步运行时抽象。
   - 领域实现抽象层，包含共用业务逻辑以及平台实现接口。
   - 平台具体实现，封装 Linux、macOS、FreeBSD 和 Windows socket 行为差异。
+- 定义 `src/platform/` 的统一内部接口边界：每个平台后端只包含自身目标平台的 socket 行为、能力探测、错误转换和 fallback 接入，并通过同名、同语义、同错误边界的接口集合向 `core`/runtime 提供能力；上层不得依赖具体平台模块的额外导出。
 - 定义 worker 生命周期、worker thread runtime、TCP accept、UDP packet 交付、Linux 兼容内部调度、受控 socket 选项和错误语义。
 - 定义 `TcpServiceConfig`/`UdpServiceConfig` 的 socket 创建后初始化回调；该回调默认不存在，在底层 socket 创建后、内部 socket 选项和 bind/listen 前同步执行。
 - 将公开 service config 拆分为 `TcpServiceConfig` 和 `UdpServiceConfig`；TCP 入口只接受 TCP 配置，UDP/QUIC 入口只接受 UDP 配置，UDP/QUIC 专属 routed packet channel capacity 不进入 TCP 配置类型。
@@ -38,6 +39,7 @@ approved_at: 2026-06-01T00:00:00+08:00
 - 不允许同时启用 tokio、async-std 与 tokio-uring 中的多个 runtime feature。
 - 不在设计阶段修改测试策略、测试计划或实现代码。
 - 不提供配置文件热加载、外部配置订阅或按协议独立线程池。
+- 不把平台私有 helper、平台特定 syscall 细节、BPF attach 细节或 Windows fallback 内部队列作为 `core`/runtime 可直接调用的额外入口；平台特有能力差异只能通过统一 capability、backend enum 或 `Unsupported`/权限错误表达。
 - 不把 `QuicServer` 设计成完整 QUIC 协议栈，不引入 quinn、TLS 配置、QUIC connection/stream API 或应用协议处理。
 - 不在本 crate 中实现 quinn `AsyncUdpSocket`，不把 quinn 或 quinn-udp 类型放入公开 API；`quinn` feature 只暴露本 crate 自有适配接口。
 - 不把 hyper 静态文件能力提升为 library API；示例不提供生产级缓存、压缩、range 请求、目录浏览、TLS 或完整 MIME 数据库。
@@ -62,7 +64,7 @@ approved_at: 2026-06-01T00:00:00+08:00
 
 1. `runtime`：对当前 feature 选中的 async runtime 做薄封装，提供类型别名、spawn/block_on/sleep 等最小适配，以及 TCP/UDP socket 从标准 socket 转换到 runtime socket 的入口；`runtime-tokio-uring` 仅在 Linux 上启用 tokio-uring 的 current-thread driver 和原生 net 类型。
 2. `core`：领域实现抽象层，持有公开配置、worker 模型、Linux 兼容内部调度、错误类型、TCP/UDP 服务循环、统一 `UdpSocket` 抽象和交付逻辑，以及面向平台层的 trait 接口。
-3. `platform`：平台具体实现，负责 bind 前 socket 创建、reuse-port/reuse-address/transparent 等选项设置，以及 Windows 或其他 fallback 用户态模拟所需的收包适配。
+3. `platform`：平台具体实现，负责 bind 前 socket 创建、reuse-port/reuse-address/transparent 等选项设置，以及 Windows 或其他 fallback 用户态模拟所需的收包适配。该层对上只暴露统一 `PlatformSocketOps`/backend/capability 形态；`linux`、`bsd`、`windows` 等 cfg-gated 模块可以拥有平台私有 helper，但这些 helper 不进入上层依赖边界。
 
 公开 API 不暴露上述内部层级。公开类型保留在 crate 根或 `api` 模块中，再 re-export 给调用方；内部模块负责降低实现耦合。
 
@@ -111,11 +113,11 @@ approved_at: 2026-06-01T00:00:00+08:00
 |------|------|------|------|------|------|----------|
 | `runtime` | internal | 异步运行时抽象，按 feature 暴露当前 runtime 类型与 spawn/转换入口。 | feature、标准 socket、future | runtime 原生 stream/socket、task handle | tokio、async-std 或 tokio-uring | no |
 | `core` | internal | 需求实现抽象层，包含配置、worker、TCP/UDP 服务循环、Linux 兼容内部调度、错误、公共业务逻辑和平台 trait。 | 公开配置、回调、platform ops | worker 运行、回调交付、统一错误 | `runtime`、`platform` trait | no |
-| `platform` | internal | 平台具体实现的 cfg 分发入口。 | bind 地址、socket 选项、协议类型 | 已配置 socket 或模拟后端 | OS cfg、`socket2`/std | no |
-| `platform::unix` | internal | Linux/macOS/FreeBSD 共享 socket 设置基础。 | socket config | 已设置 socket | `socket2` | no |
-| `platform::linux` | internal | Linux reuse-port 和 IPv4/IPv6 transparent 细节。 | socket config | Linux socket 设置结果 | `platform::unix` | no |
-| `platform::bsd` | internal | macOS/FreeBSD reuse-port 行为封装。 | socket config | BSD socket 设置结果 | `platform::unix` | no |
-| `platform::windows` | internal | Windows 用户态模拟路径和 socket 创建。 | socket config | Windows socket 或模拟接收入口 | std/runtime | no |
+| `platform` | internal | 平台具体实现的 cfg 分发入口，并向 `core` 暴露唯一统一平台接口集合。 | bind 地址、socket 选项、协议类型 | 已配置 socket、模拟后端或统一 capability/error | OS cfg、`socket2`/std | no |
+| `platform::unix` | internal | Linux/macOS/FreeBSD 共享 socket 设置基础；仅由 Unix 平台后端组合使用。 | socket config | 已设置 socket | `socket2` | no |
+| `platform::linux` | internal | Linux reuse-port、eBPF/CBPF selector 和 IPv4/IPv6 transparent 细节；对上保持与其他平台相同的 backend/capability/error 形态。 | socket config | Linux socket 设置结果或统一 fallback/unsupported 结果 | `platform::unix` | no |
+| `platform::bsd` | internal | macOS/FreeBSD reuse-port 行为封装；对上保持与其他平台相同的 backend/capability/error 形态。 | socket config | BSD socket 设置结果或统一 fallback/unsupported 结果 | `platform::unix` | no |
+| `platform::windows` | internal | Windows 用户态模拟路径和 socket 创建；对上保持与其他平台相同的 backend/capability/error 形态。 | socket config | Windows socket、模拟接收入口或统一 fallback/unsupported 结果 | std/runtime | no |
 | none | Harness submodule | 当前 crate 仍由根模块包表示。 | n/a | n/a | n/a | no |
 
 ## 大模块子模块决策
@@ -134,7 +136,7 @@ approved_at: 2026-06-01T00:00:00+08:00
 | CHG-udp-runtime-socket | P-udp | 同步 `UdpServer::serve(&ServerRuntime, UdpServiceConfig, handler) -> Result<UdpServer, Error>` 提交 UDP recv task、交付 packet metadata，并把 crate 统一 `UdpSocket` 交给 handler；不导出 `BalancedUdpSocket`；task 投递完成后立即返回 `UdpServer` 对象；`UdpServer` 可按本线程优先、否则随机的规则获取监听 socket。 | `src/core/udp.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | UDP serve API 只通过显式 runtime 入口暴露，UDP handler 与统一 `UdpSocket` 绑定并隐藏平台差异，调用方不需要 `.await` 才能完成启动，返回对象可显式关闭 UDP server task并获取监听 socket。 | 不保留 `BalancedUdpSocket` 或 `serve_with_runtime`；不要求 UDP 公开类型直接等于各 runtime 或平台原生 socket；实现仍负责保护内部 bind/reuse-port 状态不被配置覆盖；不在 `serve` 内部使用 `pending`。 |
 | CHG-udp-quic-listener-serve | P-udp-quic-listener-serve | 新增 `UdpServer::serve_socket(&ServerRuntime, UdpServiceConfig, callback) -> Result<UdpServer, Error>` 和 `QuicServer::serve_socket(&ServerRuntime, UdpServiceConfig, callback) -> Result<QuicServer, Error>`，复用 UDP socket 创建、配置校验和 socket 初始化回调，在监听 worker 线程通过回调交付统一监听 `UdpSocket` 和 socket 所属 worker id，不调用数据包 handler。 | `src/core/udp.rs`、`src/core/quic.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | 新增 UDP/QUIC socket-only serve-family 入口；调用方显式传入 `&ServerRuntime`、`TcpServiceConfig`/`UdpServiceConfig` 和 socket 回调，在每个监听 worker 中获得统一 `UdpSocket` 和 worker id 后自行读取数据；`SO_REUSEPORT` 路径交付每 worker 真实 socket及对应 worker id，Windows/fallback 路径交付按 worker 隔离收包的 socket 视图及对应 worker id，内部机制不暴露。 | 不为 TCP 增加 socket-only serve；不提供公开可配置普通 UDP packet 分发或 QUIC routing 策略；不调用数据包 handler；不提供无 runtime 参数入口；不改变 handler 型 `serve` 签名；不向常规 UDP/QUIC packet handler 传递 worker id。 |
 | CHG-linux-compatible-scheduling | P-linux-compatible-scheduling | 删除公开 `DispatchPolicy` 和 dispatcher 配置；`ServerRuntimeConfig` 不包含调度字段；fallback 用户态路径使用内部 Linux 兼容 hash 选择 worker；`QuicServer` 继续使用固定 2 字节 worker index 前缀规则。 | `src/core/config.rs`、`src/core/schedule.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/core/mod.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | 公开 API 不导出 Dispatcher/DispatchPolicy，不提供 `Auto`、`RoundRobin`、`SrcHash`、`Custom` 或自定义 selector；平台 fallback 行为保持内部实现细节。 | 不提供可配置、load-aware、adaptive 或用户自定义 scheduler。 |
-| CHG-platform-behavior | P-platform | `PlatformSocketOps` trait 和 cfg-gated Linux/BSD/Windows 实现。 | `src/platform/` | 平台差异不进入公开 API。 | Windows 走用户态模拟。 |
+| CHG-platform-behavior | P-platform | `PlatformSocketOps` trait、`PlatformTcpBackend`/`PlatformUdpBackend`/`PlatformCapabilities` 统一接口形态，以及 cfg-gated Linux/BSD/Windows 实现；每个平台模块只承载本平台 socket 行为、能力探测、错误转换和 fallback 接入，平台私有 helper 不被 `core`/runtime 直接依赖。 | `src/platform/`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/core/quic.rs` | 平台差异不进入公开 API，也不让上层实现依赖某个平台模块的额外导出；上层只消费统一 backend/capability/error 形态。 | Windows 走用户态模拟；Linux eBPF/CBPF、BSD reuse-port 和 Windows fallback 能力差异都通过统一 capability、backend variant 或 `Unsupported`/权限错误表达。 |
 | CHG-socket-options | P-socket-options | `SocketOptions`、IPv4/IPv6 transparent 能力检查、设置时机和错误分类。 | `src/core/config.rs`、`src/platform/` | 配置层新增受控 socket 选项。 | 不允许覆盖内部 reuse-port/bind 状态。 |
 | CHG-socket-init-callback | P-socket-init-callback | `TcpServiceConfig` 和 `UdpServiceConfig` 持有默认 `None` 的 socket 创建后回调；平台层创建 `socket2::Socket` 后、内部选项和 bind/listen 前调用；回调错误转换为 `Error::SocketInitCallback` 并阻止服务启动。 | `src/core/config.rs`、`src/core/error.rs`、`src/platform/`、`src/core/tcp.rs`、`src/core/udp.rs` | 公开配置层新增一次性初始化钩子；不暴露 socket 所有权，不允许回调返回后继续持有可变访问权。 | 回调接收借用的 `socket2::Socket`，可调用 socket2 支持的 setter；跨平台可用性由调用方和底层 OS 负责。 |
 | CHG-dynamic-listeners | P-dynamic-listeners | 不保留 `ServerRuntime` 内部 listener registry、`ListenerId`、`ListenerProtocol`、`remove_listener` 和公开 `add_*_listener` 管理面；TCP/UDP/QUIC-aware UDP server task 只通过 `serve` 投递；`serve` 返回的 `TcpServer`、`UdpServer` 或 `QuicServer` 对象提供显式关闭能力。 | `src/core/config.rs`、`src/core/server_runtime.rs`、`src/core/tcp.rs`、`src/core/udp.rs`、`src/lib.rs`、`tests/unit/`、`tests/integration/` | 公开 API 不提供 listener 动态新增入口；内部 helper 只需服务 `serve` task 投递、server 对象关闭和 runtime drop 停止边界。 | 不提供独立 stop handle 或按 listener id 删除；已经交付的 handler future 不由 balancer 强制取消。 |
@@ -170,7 +172,7 @@ approved_at: 2026-06-01T00:00:00+08:00
 - `runtime-tokio-uring` 使用独立 feature 和独立 adapter，不复用 `runtime-tokio` adapter。每个 worker OS 线程创建并持有一个 `tokio_uring::Runtime`；executor 记录 owner thread id，本线程提交的 local task 直接调用 tokio-uring 的 local spawn，非本线程提交时通过 task channel 投递到 owner thread 后再 local spawn。公开 `TcpStream` 映射到 `tokio_uring::net::TcpStream`，公开 `UdpSocket` 由 core 包装 tokio-uring UDP handle 或等价可 clone handle，保持现有 UDP handler 可复制 socket handle 的调用形态。
 - `runtime-tokio-uring` 是 Linux 定向 feature。非 Linux 目标启用该 feature 时，crate 在 `src/lib.rs` 或 `runtime` 模块中通过 `compile_error!` 明确拒绝；这比运行时 `Unsupported` 更早暴露平台边界，也避免非 Linux 构建拉入不可用的 io_uring API。
 - tokio-uring adapter 的跨线程投递闭包保持 `Send + 'static` bounds；闭包只携带标准 socket、handler 和控制状态，tokio-uring socket/future 的创建和 poll 必须发生在目标 worker thread runtime 内。tokio-uring handler future 不要求 `Send`，以匹配 tokio-uring 原生 socket 的 current-thread 边界。
-- `core` 依赖平台 trait，不直接写 `cfg(target_os)` 分支。原因是 TCP/UDP/worker 业务逻辑应只关注 socket 能力结果，平台差异应集中在 `platform`。
+- `core` 依赖平台统一接口，不直接写 `cfg(target_os)` 分支，也不调用 `platform::linux`、`platform::bsd` 或 `platform::windows` 的额外导出。原因是 TCP/UDP/worker 业务逻辑应只关注 socket 能力结果，平台差异应集中在 `platform`。`platform::mod` 是唯一 cfg 分发点；平台私有 helper 必须保持模块私有或仅由同平台后端组合使用。
 - UDP handler 直接接收 crate 统一 `UdpSocket`。crate 不额外提供 `BalancedUdpSocket` 封装；bind、reuse-port 和 server task 生命周期仍由 `ServerRuntime`、平台 bind 路径、server 对象关闭、返回 socket drop 和 worker shutdown 控制，公开配置不得覆盖这些内部状态。
 - `serve_socket` 返回对应 server 生命周期对象并注册 socket 回调 task；回调参数为统一 `UdpSocket` 和该 socket 所属 worker id。关闭该 server 对象会停止后续 socket 读取或使 fallback socket 视图结束。应用需要停止读取时可以结束自身回调 future，或通过返回的 server 对象关闭该 socket-only serve。
 - `quinn` feature 不引入 quinn 依赖。`Cargo.toml` 中该 feature 是空 feature 或仅用于启用 cfg-gated API；默认 feature 列表不包含它。适配接口命名保持通用 UDP 语义，避免把 quinn 版本细节写入方法签名。
@@ -450,7 +452,7 @@ impl ServerRuntime {
 错误应保留源错误信息，但公开枚举不得要求调用方按平台分支。
 
 ### 平台接口
-core 层使用如下内部 trait：
+core 层使用如下内部 trait。所有 cfg-gated 平台模块都必须提供同一套语义能力，并由 `platform::mod` 选择当前目标平台实现；上层模块不得依赖某个平台后端额外导出的函数或类型。
 
 ```rust
 pub(crate) trait PlatformSocketOps {
@@ -464,6 +466,8 @@ pub(crate) trait PlatformSocketOps {
 - Unix reuse-port 路径可以返回每 worker 一个 listener/socket。
 - Windows 模拟路径可以返回一个共享接收入口；core 层使用 Linux 兼容内部调度把工作交付到目标 worker。
 - core 层只消费后端枚举暴露的统一方法，不依赖 OS cfg。
+
+平台层可在内部拆分平台私有 helper，例如 Linux BPF attach、Unix socket option setter 或 Windows fallback receiver，但这些 helper 不属于上层接口。若某个平台不支持某项能力，后端必须返回统一 `PlatformCapabilities` 缺失项、backend fallback variant 或 `Error::Unsupported`/权限错误；不得通过缺失函数、不同函数签名或平台专属公开配置让上层分支。
 
 ### 依赖接口和外部约束
 - `tokio`：仅在 `runtime-tokio` feature 下启用，需要 net、rt、macros 或等价最小 feature；worker thread 使用 `tokio::runtime::Builder::new_current_thread().enable_all()`。

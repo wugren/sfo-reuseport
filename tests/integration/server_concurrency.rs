@@ -30,6 +30,7 @@ fn free_udp_addr() -> std::net::SocketAddr {
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 async fn tcp_concurrency_limit_waits_for_per_worker_permit() {
     let addr = free_tcp_addr();
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
@@ -63,6 +64,49 @@ async fn tcp_concurrency_limit_waits_for_per_worker_permit() {
     entered.assert_no_new_entry();
 
     release.add_permits(1);
+    entered.wait_for_total(2);
+    release.add_permits(1);
+    server.close().unwrap();
+}
+
+#[tokio::test]
+#[cfg(windows)]
+async fn tcp_concurrency_limit_drops_full_worker_without_blocking_accept() {
+    let addr = free_tcp_addr();
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let entered = tracked_entries();
+    let release = Arc::new(Semaphore::new(0));
+
+    let server = TcpServer::serve(
+        &runtime,
+        TcpServiceConfig::new(addr).with_max_concurrency_per_worker(1),
+        {
+            let entered = entered.clone();
+            let release = Arc::clone(&release);
+            move |_stream| {
+                let entered = entered.clone();
+                let release = Arc::clone(&release);
+                async move {
+                    entered.enter();
+                    let permit = release.acquire().await.unwrap();
+                    drop(permit);
+                    entered.exit();
+                    Ok(())
+                }
+            }
+        },
+    )
+    .unwrap();
+
+    let _first = tokio::net::TcpStream::connect(addr).await.unwrap();
+    entered.wait_for_total(1);
+    let _second = tokio::net::TcpStream::connect(addr).await.unwrap();
+    entered.assert_no_new_entry();
+
+    release.add_permits(1);
+    entered.assert_no_new_entry();
+
+    let _third = tokio::net::TcpStream::connect(addr).await.unwrap();
     entered.wait_for_total(2);
     release.add_permits(1);
     server.close().unwrap();
@@ -107,6 +151,7 @@ async fn tcp_concurrency_limit_close_exits_waiting_listener() {
 }
 
 #[tokio::test]
+#[cfg(not(windows))]
 async fn udp_concurrency_limit_waits_for_per_worker_permit() {
     let addr = free_udp_addr();
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
@@ -141,6 +186,50 @@ async fn udp_concurrency_limit_waits_for_per_worker_permit() {
     entered.assert_no_new_entry();
 
     release.add_permits(1);
+    entered.wait_for_total(2);
+    release.add_permits(1);
+    server.close().unwrap();
+}
+
+#[tokio::test]
+#[cfg(windows)]
+async fn udp_concurrency_limit_drops_full_worker_without_blocking_recv() {
+    let addr = free_udp_addr();
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let entered = tracked_entries();
+    let release = Arc::new(Semaphore::new(0));
+
+    let server = UdpServer::serve(
+        &runtime,
+        UdpServiceConfig::new(addr).with_max_concurrency_per_worker(1),
+        {
+            let entered = entered.clone();
+            let release = Arc::clone(&release);
+            move |_socket, _meta, _payload| {
+                let entered = entered.clone();
+                let release = Arc::clone(&release);
+                async move {
+                    entered.enter();
+                    let permit = release.acquire().await.unwrap();
+                    drop(permit);
+                    entered.exit();
+                    Ok(())
+                }
+            }
+        },
+    )
+    .unwrap();
+
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.send_to(b"first", addr).await.unwrap();
+    entered.wait_for_total(1);
+    client.send_to(b"second", addr).await.unwrap();
+    entered.assert_no_new_entry();
+
+    release.add_permits(1);
+    entered.assert_no_new_entry();
+
+    client.send_to(b"third", addr).await.unwrap();
     entered.wait_for_total(2);
     release.add_permits(1);
     server.close().unwrap();

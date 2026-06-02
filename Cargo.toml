@@ -31,6 +31,7 @@ async-executor = { version = "1.14", optional = true }
 async-std = { version = "1.13", optional = true, features = ["attributes"] }
 atomic-waker = "1.1"
 getrandom = "0.3"
+libc = "0.2"
 num_cpus = "1.17"
 socket2 = { version = "0.6", features = ["all"] }
 tokio = { version = "1", optional = true, features = ["fs", "net", "rt", "rt-multi-thread", "macros", "time"] }

@@ -1,6 +1,8 @@
-use std::net::{TcpListener, UdpSocket};
+use std::io;
+use std::net::{SocketAddr, TcpListener, UdpSocket};
 
 use crate::core::{Error, SocketConfig, TcpServiceConfig, UdpServiceConfig};
+use crate::runtime;
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 mod bsd;
@@ -18,6 +20,19 @@ use bsd as imp;
 #[cfg(windows)]
 use windows as imp;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PlatformCapabilities {
+    pub(crate) reuse_port_balancing: bool,
+    pub(crate) quic_reuseport_bpf: bool,
+}
+
+pub(crate) fn capabilities() -> PlatformCapabilities {
+    PlatformCapabilities {
+        reuse_port_balancing: imp::supports_reuse_port_balancing(),
+        quic_reuseport_bpf: imp::supports_quic_reuseport_bpf(),
+    }
+}
+
 pub(crate) fn bind_tcp(config: &TcpServiceConfig) -> Result<TcpListener, Error> {
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(config.bind_addr()),
@@ -32,6 +47,7 @@ pub(crate) fn bind_tcp(config: &TcpServiceConfig) -> Result<TcpListener, Error> 
         .map_err(Error::from)?;
     socket.listen(1024).map_err(Error::from)?;
     let listener: TcpListener = socket.into();
+    listener.set_nonblocking(true).map_err(Error::from)?;
     Ok(listener)
 }
 
@@ -39,7 +55,7 @@ pub(crate) fn bind_tcp_workers(
     config: &TcpServiceConfig,
     workers: usize,
 ) -> Result<Vec<TcpListener>, Error> {
-    if supports_reuse_port_balancing() {
+    if capabilities().reuse_port_balancing {
         (0..workers).map(|_| bind_tcp(config)).collect()
     } else {
         Ok(vec![bind_tcp(config)?])
@@ -59,6 +75,7 @@ pub(crate) fn bind_udp(config: &UdpServiceConfig) -> Result<UdpSocket, Error> {
         .bind(&config.bind_addr().into())
         .map_err(Error::from)?;
     let socket: UdpSocket = socket.into();
+    socket.set_nonblocking(true).map_err(Error::from)?;
     Ok(socket)
 }
 
@@ -66,7 +83,7 @@ pub(crate) fn bind_udp_workers(
     config: &UdpServiceConfig,
     workers: usize,
 ) -> Result<Vec<UdpSocket>, Error> {
-    if supports_reuse_port_balancing() {
+    if capabilities().reuse_port_balancing {
         (0..workers).map(|_| bind_udp(config)).collect()
     } else {
         Ok(vec![bind_udp(config)?])
@@ -80,12 +97,12 @@ pub(crate) fn bind_quic_udp_reuseport_workers(
     imp::bind_quic_udp_reuseport_workers(config, workers)
 }
 
-pub fn supports_quic_reuseport_bpf() -> bool {
-    imp::supports_quic_reuseport_bpf()
-}
-
-pub fn supports_reuse_port_balancing() -> bool {
-    imp::supports_reuse_port_balancing()
+pub(crate) async fn recv_udp_original_dst(
+    socket: &runtime::UdpSocket,
+    buffer: Vec<u8>,
+    fallback_local_addr: SocketAddr,
+) -> io::Result<(usize, SocketAddr, SocketAddr, Vec<u8>)> {
+    imp::recv_udp_original_dst(socket, buffer, fallback_local_addr).await
 }
 
 fn apply_common_options<C: SocketConfig>(socket: &socket2::Socket, config: &C) -> Result<(), Error> {

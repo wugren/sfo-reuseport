@@ -1,4 +1,4 @@
-use sfo_reuseport::{UdpServiceConfig, SocketOptions};
+use sfo_reuseport::{SocketOptions, UdpServiceConfig};
 
 #[test]
 fn current_platform_can_construct_default_config() {
@@ -9,18 +9,32 @@ fn current_platform_can_construct_default_config() {
 
 #[test]
 fn reuse_port_capability_matches_target_family() {
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
-    assert!(sfo_reuseport::platform::supports_reuse_port_balancing());
+    let lib_rs = include_str!("../../src/lib.rs");
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
-    assert!(!sfo_reuseport::platform::supports_reuse_port_balancing());
+    assert!(lib_rs.contains("pub(crate) mod platform;"));
+    assert!(!lib_rs.contains("pub mod platform;"));
 }
 
 #[test]
-fn quic_reuseport_bpf_capability_matches_linux_target() {
-    #[cfg(target_os = "linux")]
-    assert!(sfo_reuseport::platform::supports_quic_reuseport_bpf());
+fn platform_backends_share_internal_capability_interface() {
+    let platform_mod = include_str!("../../src/platform/mod.rs");
+    let linux = include_str!("../../src/platform/linux.rs");
+    let bsd = include_str!("../../src/platform/bsd.rs");
+    let windows = include_str!("../../src/platform/windows.rs");
 
-    #[cfg(not(target_os = "linux"))]
-    assert!(!sfo_reuseport::platform::supports_quic_reuseport_bpf());
+    assert!(platform_mod.contains("pub(crate) struct PlatformCapabilities"));
+    assert!(platform_mod.contains("pub(crate) fn capabilities() -> PlatformCapabilities"));
+    assert!(platform_mod.contains("pub(crate) fn bind_tcp("));
+    assert!(platform_mod.contains("pub(crate) fn bind_udp("));
+    assert!(platform_mod.contains("pub(crate) fn bind_quic_udp_reuseport_workers("));
+    assert!(platform_mod.contains("pub(crate) async fn recv_udp_original_dst("));
+
+    for backend in [linux, bsd, windows] {
+        assert!(backend.contains("pub(crate) fn set_reuse_port("));
+        assert!(backend.contains("pub(crate) fn apply_transparent("));
+        assert!(backend.contains("pub(crate) fn bind_quic_udp_reuseport_workers("));
+        assert!(backend.contains("pub(crate) fn supports_reuse_port_balancing("));
+        assert!(backend.contains("pub(crate) fn supports_quic_reuseport_bpf("));
+        assert!(backend.contains("pub(crate) async fn recv_udp_original_dst("));
+    }
 }

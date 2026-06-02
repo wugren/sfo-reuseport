@@ -71,7 +71,7 @@ where
     F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
 {
-    if platform::supports_reuse_port_balancing() {
+    if platform::capabilities().reuse_port_balancing {
         if add_quic_socket_callback_reuseport_bpf_listener(
             runtime,
             &service_config,
@@ -144,7 +144,7 @@ where
     F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
     Fut: HandlerFuture,
 {
-    if platform::supports_reuse_port_balancing() {
+    if platform::capabilities().reuse_port_balancing {
         return add_quic_reuseport_listener(runtime, service_config, handler, state);
     }
 
