@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 
 use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, UdpServiceConfig, UdpServer};
 
-#[cfg(feature = "runtime-tokio")]
+#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     run().await
@@ -13,11 +13,6 @@ async fn main() -> Result<(), Error> {
 #[async_std::main]
 async fn main() -> Result<(), Error> {
     run().await
-}
-
-#[cfg(feature = "runtime-tokio-uring")]
-fn main() -> Result<(), Error> {
-    tokio_uring::start(run())
 }
 
 async fn run() -> Result<(), Error> {

@@ -1,13 +1,8 @@
-#[cfg(not(feature = "runtime-tokio-uring"))]
 use std::net::SocketAddr;
 
-#[cfg(not(feature = "runtime-tokio-uring"))]
 use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, TcpServiceConfig, TcpServer};
 
-#[cfg(feature = "runtime-tokio-uring")]
-fn main() {}
-
-#[cfg(feature = "runtime-tokio")]
+#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     run().await
@@ -19,7 +14,6 @@ async fn main() -> Result<(), Error> {
     run().await
 }
 
-#[cfg(not(feature = "runtime-tokio-uring"))]
 async fn run() -> Result<(), Error> {
     let bind_addr: SocketAddr = "127.0.0.1:7000"
         .parse()
@@ -33,7 +27,7 @@ async fn run() -> Result<(), Error> {
     std::future::pending::<Result<(), Error>>().await
 }
 
-#[cfg(feature = "runtime-tokio")]
+#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
 async fn echo_connection(stream: sfo_reuseport::TcpStream) -> Result<(), Error> {
     use std::io::ErrorKind;
 
@@ -50,7 +44,7 @@ async fn echo_connection(stream: sfo_reuseport::TcpStream) -> Result<(), Error> 
     }
 }
 
-#[cfg(feature = "runtime-tokio")]
+#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
 async fn write_all(stream: &sfo_reuseport::TcpStream, mut bytes: &[u8]) -> Result<(), Error> {
     use std::io::ErrorKind;
 

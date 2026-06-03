@@ -118,7 +118,11 @@ impl UdpServiceConfig {
 
     #[cfg(all(
         not(windows),
-        any(feature = "runtime-tokio", feature = "runtime-async-std")
+        any(
+            feature = "runtime-tokio",
+            feature = "runtime-async-std",
+            feature = "runtime-tokio-uring"
+        )
     ))]
     pub(crate) fn routed_packet_channel_capacity(&self) -> usize {
         self.routed_packet_channel_capacity

@@ -4,7 +4,7 @@ submodule:
 version: v0.1
 status: approved
 approved_by: auto-pipeline
-approved_at: 2026-06-03T11:07:11+08:00
+approved_at: 2026-06-03T17:58:21+08:00
 ---
 
 # sfo-reuseport 提案
@@ -19,7 +19,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 - 提供用于 TCP 与 UDP multi-worker 服务的 library crate API。
 - 通过 feature 选择 runtime，默认 `runtime-tokio`，可替换为 `runtime-async-std` 或 `runtime-tokio-uring`。
 - 编译期拒绝同时启用多个 runtime feature。
-- 启用 `runtime-tokio-uring` 时，公开 TCP 回调类型必须使用 tokio-uring 的原生 TCP stream 类型或等价接口；公开 UDP 回调使用统一 `UdpSocket` 抽象，该抽象需要在 tokio-uring feature 下提供等价的 tokio-uring UDP I/O 能力。
+- 启用 `runtime-tokio-uring` 时，网络相关公开接口继续使用 tokio 的 TCP/UDP 网络类型或统一 `UdpSocket` 的 tokio 网络 I/O 能力，不暴露 tokio-uring 原生网络类型；该 feature 保留互斥 feature、Linux cfg 和依赖边界，网络 socket 转换与 handler 执行使用 tokio 兼容后端。
 - TCP worker 服务：每个被 accept 的连接都通过 async 用户回调交付，回调参数包含当前 runtime 的原生 `TcpStream`，但不包含 `worker_id`。
 - UDP worker 服务：每个收到的数据包都通过 async 用户回调交付，回调参数包含 crate 公开的统一 `UdpSocket` 抽象以及由后续设计定义的数据包数据/来源元信息，但不包含 `worker_id`。
 - 提供名为 `UdpSocket` 的跨平台公开抽象，用于统一 Linux 原生监听 socket、Windows 或其他 fallback 平台的模拟/代理 socket 行为，以及不同 runtime feature 下的 UDP I/O 表面；不提供 `BalancedUdpSocket` 公开类型，并由实现保持 balancer 必需的 bind/reuse-port 状态不被公开配置覆盖。
@@ -85,7 +85,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - `QuicServer` 由本 crate 负责 UDP 包分配与 worker 稳定路由，QUIC 协议状态由调用方或上层 QUIC crate 负责；如果上层需要连接迁移或 NAT rebinding，必须使用能够让本 crate 从数据包中恢复目标 worker 的 QUIC 路由键。
   - routed packet channel 容量属于 Windows 目标下 `UdpServer`/`QuicServer` 使用的 `UdpServiceConfig` 公开配置能力；默认值常量由接口层导出或在接口层定义，避免 runtime/backend 实现各自复制默认值；非 Windows 目标不暴露该 builder/getter，`TcpServer` 不读取、不校验该容量。
   - `QuicServer` 的公开命名表示 QUIC-aware UDP routing，不表示本 crate 提供完整 QUIC server 协议栈。
-  - `runtime-tokio-uring` 可作为 Linux 定向 runtime feature 提供；非 Linux 平台上的编译期或运行时行为由后续设计定义，但必须给出明确错误或 cfg 边界。
+  - `runtime-tokio-uring` 可作为 Linux 定向 runtime feature 提供；其网络相关公开接口继续使用 tokio 网络类型或统一 `UdpSocket` 的 tokio 网络 I/O 能力，不要求调用方使用 tokio-uring net API；该 feature 的网络 socket 转换和 handler 执行可复用 tokio 兼容后端；非 Linux 平台上的编译期或运行时行为由后续设计定义，但必须给出明确错误或 cfg 边界。
   - HTTP 静态文件服务器示例只覆盖常见本地演示场景：监听地址和静态根目录可通过参数指定，普通文件请求返回文件内容，目录请求可尝试 `index.html`，越过静态根目录的路径必须拒绝。
   - crates.io 发布元数据应来自仓库内稳定事实：README 作为 readme，MIT 许可来自根目录 `LICENSE`，描述、keywords 和 categories 只表达本 crate 的 multi-worker socket/reuse-port/runtime 能力，不暗示完整 HTTP、TLS 或 QUIC 协议栈。
 - 未决歧义：
@@ -103,14 +103,14 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - `QuicServer` 在 Linux eBPF reuse-port selector 不可用时应返回 `Unsupported`，还是退回用户态 UDP 包分发。
   - 初始 QUIC 数据包或缺少可识别 worker 路由键的数据包应被丢弃、按来源地址分配，还是交给调用方指定的默认 worker。
   - QUIC CID 中 worker 标识使用 DCID 开头的固定 2 字节网络字节序 worker index 前缀；上层 QUIC crate 必须按该 layout 生成 server CID，`QuicServer` 不提供其他 layout 或自动推断。
-  - tokio-uring 的 current-thread 运行时、socket 类型和 future `Send` 边界是否能完全复用现有 worker thread runtime 约束，需要在设计阶段确认并定义不兼容时的 API 或实现边界。
+  - tokio-uring feature 的 Linux cfg、依赖边界、tokio 网络 socket 兼容后端和 future `Send` 边界是否能完全复用现有 worker thread runtime 约束，需要在设计阶段确认并定义不兼容时的 API 或实现边界。
 - 批准前需确认：
   - 上述歧义可在设计阶段解决，且不会改变本提案范围。
 
 ## 约束
 - 可用库/组件：
   - Rust 标准库中的网络和线程设施。
-  - 由互斥 feature 选择的 runtime crate：tokio、async-std 或 tokio-uring。
+  - 由互斥 feature 选择的 runtime crate：tokio、async-std 或 tokio-uring；`runtime-tokio-uring` 的网络接口仍依赖 tokio 网络类型或统一 `UdpSocket` 的 tokio 网络 I/O 能力。
   - 经设计说明后可使用 `socket2` 等低层 socket 设置 crate。
   - 经设计说明后可使用 `num_cpus` 等 CPU 数量发现 crate。
 - 禁止方案：
@@ -140,7 +140,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 ## 高层结果
 - Rust 用户可以在不手写平台特定 socket 设置的情况下，把 TCP 连接或 UDP 数据包服务运行在多个 worker 上。
 - 公开 API 与协议无关，通过用户 async 回调交付工作，不强加 HTTP、QUIC 或自定义协议假设。
-- tokio、async-std 与 tokio-uring 通过互斥 crate feature 提供同形 API；启用 tokio-uring 时，用户 TCP 回调获得 tokio-uring 原生 stream 能力，UDP 回调通过统一 `UdpSocket` 获得等价 UDP I/O 能力。
+- tokio、async-std 与 tokio-uring 通过互斥 crate feature 提供同形 API；启用 tokio-uring 时，用户网络回调仍使用 tokio 的 TCP/UDP 网络接口或统一 `UdpSocket` 的 tokio 网络 I/O 能力，避免调用方直接依赖 tokio-uring 原生网络类型。
 - UDP 用户获得与 Linux `SO_REUSEPORT` 语义一致的确定性 worker 分配；公开 API 不提供策略选择或自定义分发回调。
 - QUIC UDP 用户可以使用专门的 `QuicServer` 入口，让具备 QUIC 路由键的数据包在多 worker reuse-port 场景下稳定进入同一 worker，而无需本 crate 接管 QUIC 协议状态。
 - 用户可以通过 `serve` 入口把 TCP/UDP/QUIC-aware UDP server task 投递到 `ServerRuntime` 的 worker 线程，并让这些 task 共享同一套 worker 线程集合；`serve` 返回的 `TcpServer`、`UdpServer` 或 `QuicServer` 对象可以显式关闭对应 task。
@@ -157,7 +157,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | proposal_id | change_id | Outcome | Scope Boundary | Success Evidence | Explicit Non-goals |
 |-------------|-----------|---------|----------------|------------------|--------------------|
 | P-runtime | CHG-runtime-features | 提供互斥 runtime feature，默认 tokio，可选 async-std 或 tokio-uring。 | Cargo features 以及公开 runtime type aliases 或等价机制。 | 编译检查证明同一时间只有一个 runtime 激活，且公开回调类型匹配所选 runtime。 | 不支持同时构建多个 runtime。 |
-| P-tokio-uring-runtime | CHG-tokio-uring-runtime | 增加 `runtime-tokio-uring` 互斥 runtime feature，使用户在启用该 feature 时可通过公开回调类型使用 tokio-uring 的 TCP I/O 和统一 `UdpSocket` 的等价 UDP I/O 接口。 | Cargo features、runtime 类型别名或适配层、worker thread runtime 启动方式、TCP/UDP/QUIC-aware UDP 回调类型映射，以及非 Linux 平台 cfg 或错误边界。 | 编译检查证明 `runtime-tokio-uring` 与其他 runtime feature 互斥；启用后公开 `TcpStream` 类型或等价接口来自 tokio-uring，统一 `UdpSocket` 提供 tokio-uring feature 下可用的 UDP I/O 表面；示例或测试证明用户 handler 可以调用 tokio-uring 相关 I/O API。 | 不引入第四种 runtime；不支持同时启用 tokio-uring 与 tokio 或 async-std；不要求 tokio-uring 在非 Linux 平台提供可运行实现；不要求 UDP 公开类型直接等于 tokio-uring 原生 socket 类型。 |
+| P-tokio-uring-runtime | CHG-tokio-uring-runtime | 增加 `runtime-tokio-uring` 互斥 runtime feature，但网络相关公开接口继续使用 tokio 的 TCP/UDP 网络类型或统一 `UdpSocket` 的 tokio 网络 I/O 能力。 | Cargo features、runtime 类型别名或适配层、worker thread runtime 启动方式、TCP/UDP/QUIC-aware UDP 回调类型映射、tokio 网络 socket 兼容后端，以及非 Linux 平台 cfg 或错误边界。 | 编译检查证明 `runtime-tokio-uring` 与其他 runtime feature 互斥；启用后公开 `TcpStream` 类型或等价接口不来自 tokio-uring 原生 net 类型，而是保持 tokio 网络接口；统一 `UdpSocket` 提供 tokio 网络 I/O 表面；示例或测试证明用户 handler 不需要调用 tokio-uring net API 也能使用网络服务。 | 不引入第四种 runtime；不支持同时启用 tokio-uring 与 tokio 或 async-std；不要求 tokio-uring 在非 Linux 平台提供可运行实现；不暴露 tokio-uring 原生 TCP/UDP socket 类型作为网络公开接口。 |
 | P-server-runtime | CHG-server-runtime | 提供 `ServerRuntime` 作为共享 worker 运行时抽象，worker 数量在 runtime 初始化时确定。 | `ServerRuntime` 配置、共享 worker 持有、server task 投递入口；server config 不再拥有 worker 数量；`TcpServer`、`UdpServer`、`QuicServer` 的单协议入口只接受显式 `&ServerRuntime`，且 `serve` 是同步 task 投递方法并返回对应 server 对象。 | 测试或示例展示多个 TCP/UDP/QUIC-aware UDP server task 共享同一 `ServerRuntime` worker 配置，公开 server config 不暴露 worker 设置，不存在无 runtime 参数的 `serve` 或 `serve_with_runtime` 并列入口，且 `serve` 返回值不是 future 而是 `TcpServer`、`UdpServer` 或 `QuicServer` 对象。 | 不提供每 server 独立 worker 池作为 v0.1 默认模型；不提供隐式默认 runtime convenience API；不让 `serve` 内部长期挂起代表服务生命周期。 |
 | P-server-runtime-random-task | CHG-server-runtime-random-task | `ServerRuntime` 导出一个把调用方异步任务投递到随机 worker 中执行的公开接口。 | `ServerRuntime` 公开 task 投递方法、随机 worker 选择、任务 future bounds、返回 task handle 或错误、runtime 关闭后的投递错误边界，以及与现有 worker 线程集合共享的生命周期。 | API 编译覆盖证明调用方可以通过 `ServerRuntime` 把异步任务投递到随机 worker 执行并获得可观察完成结果或 task handle；运行期验证多次投递会进入已有 worker runtime 执行，不创建额外线程池；runtime 关闭后投递返回明确错误；公开 API 不暴露指定 worker 投递、不向任务回调提供 worker id、不引入负载感知调度策略或跨 worker channel。 | 不提供指定 worker 投递接口；不提供负载感知、优先级、队列容量配置、跨 worker 通信、任务取消策略或 listener 管理面；不改变 `TcpServer`、`UdpServer`、`QuicServer` 的 `serve` 入口约束。 |
 | P-service-config-split | CHG-service-config-split | TCP 和 UDP/QUIC 使用不同公开 service config 类型，避免 UDP/QUIC 专属 routed packet channel 配置进入 TCP API。 | `TcpServiceConfig`、`UdpServiceConfig`、`TcpServer::serve` 参数、`UdpServer::serve`/`serve_socket` 参数、`QuicServer::serve`/`serve_socket` 参数、crate root re-export、平台 bind helper 的 typed config 边界。 | API 编译覆盖证明 `TcpServer` 接受 `TcpServiceConfig`，`UdpServer` 和 `QuicServer` 接受 `UdpServiceConfig`，`TcpServiceConfig` 不提供 routed packet channel capacity 配置，`UdpServiceConfig` 仅在 Windows 公开该配置并默认 4096。 | 不保留一个覆盖 TCP/UDP/QUIC 的共用 service config 作为公开入口；不为 TCP 增加 routed packet channel 语义；不改变两类配置共享字段的语义。 |
@@ -204,7 +204,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
   - `src/platform/` 下每个平台模块只包含对应目标平台的 socket 行为和 fallback 接入，且 Linux、macOS、FreeBSD、Windows 等平台后端向上层提供同一套平台接口形态；上层 `core`/runtime 实现不直接依赖具体平台模块的额外导出。
 - 必需证据：
   - 实现前，approved `proposal.md` 和 `design.md` 都直接映射相关 `change_id`，并通过 schema/admission 检查。
-  - 实现后，测试阶段通过生成或更新测试实现、可选 `testing.md`、可选 `testplan.yaml`，覆盖 runtime feature gating、tokio-uring 公开接口可用性、统一 `UdpSocket` 跨平台 API、worker 行为、TCP 服务、UDP 服务、UDP/QUIC socket-only serve 入口、QUIC-aware UDP 包分配、serve 返回 server 对象的显式关闭能力、TCP/UDP/QUIC 常规 handler 并发数限制、UDP/QUIC server 对象获取监听 socket 能力、混合协议 worker、Linux 兼容内部调度、socket 选项配置和平台特定编译验证。
+  - 实现后，测试阶段通过生成或更新测试实现、可选 `testing.md`、可选 `testplan.yaml`，覆盖 runtime feature gating、`runtime-tokio-uring` 下网络公开接口保持 tokio 网络类型/能力、统一 `UdpSocket` 跨平台 API、worker 行为、TCP 服务、UDP 服务、UDP/QUIC socket-only serve 入口、QUIC-aware UDP 包分配、serve 返回 server 对象的显式关闭能力、TCP/UDP/QUIC 常规 handler 并发数限制、UDP/QUIC server 对象获取监听 socket 能力、混合协议 worker、Linux 兼容内部调度、socket 选项配置和平台特定编译验证。
   - `CHG-hyper-static-example` 实现后，测试阶段覆盖示例编译、可配置静态根目录、基础 200/404 响应和路径遍历拒绝。
   - `CHG-quinn-udp-socket-compat` 实现后，测试阶段覆盖默认关闭的 `quinn` feature gate、启用 feature 后 `UdpSocket` quinn 适配接口可见、`runtime-tokio` 真实 socket 与 fallback routed socket 都能通过这些接口完成非阻塞收发、其他 runtime 组合可编译且不具备 readiness/nonblocking 能力时返回 unsupported，以及本 crate 不直接依赖或实现 quinn `AsyncUdpSocket`。
   - `CHG-publish-metadata` 实现后，验证 package manifest 与文件列表满足发布前检查，并确认元数据没有扩大公开 API 或协议能力承诺。
@@ -214,7 +214,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 
 ## 风险
 - 如果公开类型没有通过 feature 仔细隔离，runtime 抽象可能泄漏。
-- tokio-uring 的平台支持、current-thread runtime 模型和 socket API 与 tokio/async-std 不完全一致，若设计未明确 `Send`、worker thread 和非 Linux 行为，可能导致 API 承诺无法实现。
+- tokio-uring 的平台支持、依赖边界与 tokio 网络 socket 兼容后端不完全一致，若设计未明确 `Send`、worker thread、网络接口边界和非 Linux 行为，可能导致 API 承诺无法实现。
 - 如果未精确定义 Linux 兼容调度语义，Windows 或其他 fallback 用户态模拟可能偏离 Linux `SO_REUSEPORT` 行为。
 - Linux 兼容调度的 hash 输入必须确定且有界，避免平台间 worker 选择漂移。
 - 如果 API bounds 过于含糊，多线程回调执行会掩盖统一 `UdpSocket` 在 runtime 原生 socket、Linux reuse-port socket 和 Windows/fallback 模拟 socket 之间的 clone/share、所有权和生命周期要求。
@@ -242,7 +242,7 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | runtime/integration | yes | 新增 `TcpServer`、`UdpServer` 和 `QuicServer` 常规 handler 并发数限制会改变 listener loop、handler 投递、完成释放和关闭边界；新约束要求 concurrency helper 只服务 worker 单线程内状态，不支持跨线程共享同步；用户态模拟 TCP/UDP/QUIC reuse-port 或路由路径必须避免满载 worker 对整个 accept/recv loop 造成队头阻塞。 | design 需定义 `TcpServiceConfig::max_concurrency_per_worker` 或 `UdpServiceConfig::max_concurrency_per_worker` 的具体类型和 builder/API 形态、默认不限制、显式 0 不限制、每个 worker 线程独立计数、native per-worker listener 路径 accept/recv 前等待新许可、用户态模拟 TCP/UDP/QUIC reuse-port 或路由路径满载 worker 连接/数据包丢弃并继续 accept/recv、许可释放、close/drop 解除等待边界，以及 permit 状态不跨线程共享的实现边界；post-implementation testing 需覆盖上限命中、释放后继续处理、TCP/UDP/QUIC 模拟路径满载 worker 不阻塞其他 worker、默认和 0 不限、关闭不泄漏和三种 server 类型。 | none | design 阶段先补齐接口与运行时边界；实现后 testing 阶段补齐验证。 | 若许可等待与 handler panic/错误路径耦合，可能导致连接饥饿、UDP/QUIC 数据包无界排队或永久阻塞；若用户态模拟路径在满载 worker 上等待许可，会造成其他 worker 连接或数据包接收被队头阻塞；若后续实现仍把 permit 状态跨线程共享，将违反单 worker 单线程约束。 |
 | runtime/integration | yes | fallback 用户态 UDP/QUIC routed packet channel 从无界队列变为有界队列，且 Windows 目标容量来自公开配置。 | design 需定义 Windows-only 配置接口、默认容量常量位置、合法容量范围、满队列时发送方等待或拒绝的语义、关闭时等待方退出语义，以及 runtime feature 后端如何使用同一容量；post-implementation testing 需覆盖默认 4096、Windows 显式覆盖、非 Windows 不暴露公开容量接口和所有 routed packet channel 非无界。 | none | design 阶段先补齐接口与运行时边界；实现后 testing 阶段补齐验证。 | 容量过小或满队列处理不当可能造成 fallback 路径丢包、阻塞关闭或内存压力。 |
 | build/dependency/config/deployment | yes | Linux 高性能路径可能引入 eBPF/CBPF 相关 build、feature 或平台配置。 | design 需声明 feature/dependency/config 表面；post-implementation testing 需包含可复现构建或配置验证。 | none | design 阶段先补齐实现边界；实现后 testing 阶段补齐验证。 | eBPF 依赖和权限模型未定。 |
-| build/dependency/config/deployment | yes | 新增 `runtime-tokio-uring` feature 会引入 tokio-uring 依赖、Linux 平台 cfg 和互斥 feature 组合。 | design 需声明依赖版本、feature 互斥规则、非 Linux 行为和 worker runtime 启动方式；post-implementation testing 需覆盖 feature 编译矩阵和 tokio-uring handler API。 | none | design 阶段先补齐实现边界；实现后 testing 阶段补齐验证。 | tokio-uring 依赖和平台限制未设计前不能进入实现。 |
+| build/dependency/config/deployment | yes | 新增 `runtime-tokio-uring` feature 会引入 tokio-uring 依赖、Linux 平台 cfg、互斥 feature 组合，并要求网络公开接口继续使用 tokio 网络类型或统一 `UdpSocket` 的 tokio 网络 I/O 能力。 | design 需声明依赖版本、feature 互斥规则、非 Linux 行为、worker runtime 启动方式，以及 tokio 网络 socket 兼容后端边界；post-implementation testing 需覆盖 feature 编译矩阵和 `runtime-tokio-uring` 下 tokio 网络接口可用性。 | none | design 阶段先补齐实现边界；实现后 testing 阶段补齐验证。 | tokio-uring feature 与 tokio 网络 socket 的兼容边界未设计前不能进入实现。 |
 | build/dependency/config/deployment | yes | 新增默认关闭的 `quinn` feature 会改变 Cargo feature 表面，并在启用时公开额外 `UdpSocket` 适配接口。 | design 需声明 `quinn` feature 是否引入可选依赖、默认 feature 边界、公开接口签名和与 runtime feature 的组合规则；post-implementation testing 需覆盖默认不可见、启用后可见和本 crate 不直接实现 quinn trait 的编译契约。 | none | design 阶段先补齐 feature 和接口边界；实现后 testing 阶段补齐验证。 | 若 feature 命名或接口语义与 quinn 版本强绑定，可能造成额外维护成本。 |
 | build/dependency/config/deployment | yes | crates.io 发布元数据会改变 Cargo package manifest 和发布前检查结果。 | design 需明确具体 package metadata 字段、发布文件包含/排除边界和验证命令；implementation 需只改 manifest/package 资源；post-implementation testing 或 acceptance 需记录 package manifest/list 检查证据。 | none | design 阶段先补齐发布元数据字段；实现后验证 package 列表。 | URL、keywords 或 categories 若未确认，可能导致发布页面误导或发布失败。 |
 | ui/datamodel/workflow | no | crate 无 UI。 | none | none | none | none |
@@ -308,10 +308,10 @@ v0.1 的目标是提供一个协议无关的 Rust 库，支持 TCP accept 均衡
 | FU-048 | design | 定义 `quinn` feature 的默认关闭策略、是否引入可选依赖、`UdpSocket` feature-gated poll/readiness 接口签名、真实 socket 和 fallback routed socket 的一致语义、错误与 readiness 语义，以及与调用方 quinn adapter 的责任边界。 | P-quinn-udp-socket-compat/P-udp-quic-listener-serve/P-udp/P-quic-routed-udp | yes |
 | FU-049 | testing | 为 `CHG-quinn-udp-socket-compat` 增加测试计划和 API 编译契约，覆盖默认 features 下接口不可见、启用 `quinn` feature 后接口可见、调用方 adapter 可用这些接口实现 quinn `AsyncUdpSocket`、tokio 真实 socket 与 routed fallback socket 收发一致、其他 runtime feature 组合可编译且 unsupported 边界明确，以及本 crate 不直接依赖或实现 quinn trait。 | P-quinn-udp-socket-compat | yes |
 | FU-050 | implementation | 仅在 design 重新批准且 `CHG-quinn-udp-socket-compat` 实现准入通过后，在 `Cargo.toml` 和统一 `UdpSocket` 中实施默认关闭的 `quinn` feature 与适配接口；相关测试代码和测试元数据在后续 testing 阶段同步。 | P-quinn-udp-socket-compat | yes |
-| FU-033 | design | 定义 `runtime-tokio-uring` 的 Cargo feature、依赖版本、公开类型映射、worker thread runtime 启动方式、handler future bounds、非 Linux cfg/错误边界，以及与现有 tokio/async-std 互斥规则的关系。 | P-tokio-uring-runtime/P-runtime/P-worker-thread-runtime/P-tcp/P-udp/P-quic-routed-udp | yes |
-| FU-034 | testing | 为 `CHG-tokio-uring-runtime` 增加测试计划，覆盖 feature 互斥、Linux cfg 编译、公开 socket 类型或等价接口、用户 handler 调用 tokio-uring API，以及非 Linux 行为边界。 | P-tokio-uring-runtime | yes |
-| FU-035 | implementation | 仅在 design 重新批准且 `CHG-tokio-uring-runtime` 实现准入通过后，实施 `runtime-tokio-uring` 生产代码、Cargo feature 和必要 runtime 适配；相关测试代码和测试元数据在后续 testing 阶段同步。 | P-tokio-uring-runtime | yes |
-| FU-036 | acceptance | tokio-uring 实现和验证完成后，审计 proposal、design、代码、测试和运行结果是否一致，特别检查互斥 feature、平台边界和公开 API 承诺。 | P-tokio-uring-runtime | yes |
+| FU-033 | design | 定义 `runtime-tokio-uring` 的 Cargo feature、依赖版本、公开类型映射、worker thread runtime 启动方式、handler future bounds、非 Linux cfg/错误边界、tokio 网络 socket 兼容后端，以及与现有 tokio/async-std 互斥规则的关系。 | P-tokio-uring-runtime/P-runtime/P-worker-thread-runtime/P-tcp/P-udp/P-quic-routed-udp | yes |
+| FU-034 | testing | 为 `CHG-tokio-uring-runtime` 增加测试计划，覆盖 feature 互斥、Linux cfg 编译、公开网络接口保持 tokio 网络类型或统一 `UdpSocket` 的 tokio 网络 I/O 能力、用户 handler 不依赖 tokio-uring net API，以及非 Linux 行为边界。 | P-tokio-uring-runtime | yes |
+| FU-035 | implementation | 仅在 design 重新批准且 `CHG-tokio-uring-runtime` 实现准入通过后，实施 `runtime-tokio-uring` 生产代码、Cargo feature、必要 runtime 适配，以及 tokio 网络接口兼容后端；相关测试代码和测试元数据在后续 testing 阶段同步。 | P-tokio-uring-runtime | yes |
+| FU-036 | acceptance | tokio-uring 实现和验证完成后，审计 proposal、design、代码、测试和运行结果是否一致，特别检查互斥 feature、平台边界、tokio 网络接口边界和公开 API 承诺。 | P-tokio-uring-runtime | yes |
 | FU-037 | design | 定义 hyper 静态文件服务器示例的文件位置、example target、依赖边界、参数格式、请求路径解析、安全边界和与 `TcpServer`/`ServerRuntime` 的连接方式。 | P-hyper-static-example | yes |
 | FU-038 | implementation | 仅在 proposal/design 重新批准且 `CHG-hyper-static-example` 实现准入通过后，新增或更新 `examples/` 中的 hyper 静态文件服务器示例及必要 Cargo 示例依赖；相关测试代码和测试元数据在后续 testing 阶段同步。 | P-hyper-static-example | yes |
 | FU-039 | testing | 为 `CHG-hyper-static-example` 增加测试计划或测试实现，覆盖示例编译、参数设置静态根目录、普通文件响应、缺失文件响应和路径遍历拒绝。 | P-hyper-static-example | yes |

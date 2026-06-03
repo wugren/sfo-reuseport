@@ -38,6 +38,7 @@ COMMANDS = {
             ["cargo", "test", "--lib", "--features", "quinn"],
             ["cargo", "test", "--test", "unit"],
             ["cargo", "test", "--test", "unit", "--features", "quinn"],
+            ["cargo", "test", "--no-default-features", "--features", "runtime-tokio-uring", "--test", "unit"],
         ],
         "dv": [
             ["cargo", "check"],

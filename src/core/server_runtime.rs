@@ -54,21 +54,11 @@ impl ServerRuntime {
         self.inner.workers.len()
     }
 
-    #[cfg(feature = "runtime-tokio-uring")]
-    pub(crate) fn submit_to_worker<T, Fut>(
-        &self,
-        worker_id: usize,
-        task: T,
-    ) -> Result<runtime::TaskHandle, Error>
-    where
-        T: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = ()> + 'static,
-    {
-        let worker = self.worker(worker_id)?;
-        worker.submit(runtime::executor_task(task)).map_err(Error::from)
-    }
-
-    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
+    #[cfg(any(
+        feature = "runtime-tokio",
+        feature = "runtime-async-std",
+        feature = "runtime-tokio-uring"
+    ))]
     pub(crate) fn submit_to_worker<T, Fut>(
         &self,
         worker_id: usize,
@@ -82,22 +72,11 @@ impl ServerRuntime {
         worker.submit(runtime::executor_task(task)).map_err(Error::from)
     }
 
-    #[cfg(feature = "runtime-tokio-uring")]
-    #[allow(dead_code)]
-    pub(crate) fn submit_to_executor<T, Fut>(
-        executor: &runtime::ExecutorHandle,
-        task: T,
-    ) -> Result<runtime::TaskHandle, Error>
-    where
-        T: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = ()> + 'static,
-    {
-        executor
-            .spawn_task(runtime::executor_task(task))
-            .map_err(Error::from)
-    }
-
-    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
+    #[cfg(any(
+        feature = "runtime-tokio",
+        feature = "runtime-async-std",
+        feature = "runtime-tokio-uring"
+    ))]
     pub(crate) fn submit_to_executor<T, Fut>(
         executor: &runtime::ExecutorHandle,
         task: T,
@@ -123,22 +102,11 @@ impl ServerRuntime {
         Arc::clone(&self.inner.active)
     }
 
-    #[cfg(feature = "runtime-tokio-uring")]
-    fn submit_future_to_worker<Fut>(
-        &self,
-        worker_id: usize,
-        future: Fut,
-    ) -> Result<runtime::TaskHandle, Error>
-    where
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        let worker = self.worker(worker_id)?;
-        worker
-            .submit(Box::new(move || Box::pin(future)))
-            .map_err(Error::from)
-    }
-
-    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
+    #[cfg(any(
+        feature = "runtime-tokio",
+        feature = "runtime-async-std",
+        feature = "runtime-tokio-uring"
+    ))]
     fn submit_future_to_worker<Fut>(
         &self,
         worker_id: usize,

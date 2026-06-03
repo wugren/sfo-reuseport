@@ -26,17 +26,22 @@ pub use udp::{PacketMeta, UdpServer, UdpSocket};
 pub(crate) use schedule::linux_reuseport_select;
 pub(crate) use concurrency::{ConcurrencyPermit, WorkerConcurrencyLimit};
 
-#[cfg(feature = "runtime-tokio-uring")]
-pub(crate) type HandlerFutureBox = Pin<Box<dyn Future<Output = Result<(), Error>>>>;
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
+#[cfg(any(
+    feature = "runtime-tokio",
+    feature = "runtime-async-std",
+    feature = "runtime-tokio-uring"
+))]
 pub(crate) type HandlerFutureBox = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
 
-#[cfg(feature = "runtime-tokio-uring")]
-pub trait HandlerFuture: Future<Output = Result<(), Error>> + 'static {}
-#[cfg(feature = "runtime-tokio-uring")]
-impl<T> HandlerFuture for T where T: Future<Output = Result<(), Error>> + 'static {}
-
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
+#[cfg(any(
+    feature = "runtime-tokio",
+    feature = "runtime-async-std",
+    feature = "runtime-tokio-uring"
+))]
 pub trait HandlerFuture: Future<Output = Result<(), Error>> + Send + 'static {}
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
+#[cfg(any(
+    feature = "runtime-tokio",
+    feature = "runtime-async-std",
+    feature = "runtime-tokio-uring"
+))]
 impl<T> HandlerFuture for T where T: Future<Output = Result<(), Error>> + Send + 'static {}

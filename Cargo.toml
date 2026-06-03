@@ -1,6 +1,6 @@
 [package]
 name = "sfo-reuseport"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version = "1.85"
 description = "Multi-worker TCP and UDP services with reuse-port style socket distribution"

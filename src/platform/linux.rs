@@ -136,7 +136,7 @@ fn recv_udp_original_dst_raw<T: AsRawFd>(
         message.msg_iov = &mut iov;
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
-        message.msg_controllen = control.len();
+        message.msg_controllen = control.len() as _;
 
         let len = libc::recvmsg(socket.as_raw_fd(), &mut message, 0);
         if len < 0 {
