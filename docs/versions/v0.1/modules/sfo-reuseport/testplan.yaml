@@ -42,6 +42,10 @@ levels:
         name: ServerRuntime 共享 worker 配置和公开 API 表面
         change_ids: ["CHG-server-runtime", "CHG-worker-model"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: server-runtime-random-task
+        name: ServerRuntime 随机 worker task 投递接口
+        change_ids: ["CHG-server-runtime-random-task"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: explicit-runtime-serve-api
         name: TcpServer UdpServer QuicServer 只接受显式 ServerRuntime 的同步 serve 入口并返回 server 对象
         change_ids: ["CHG-server-runtime", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp", "CHG-dynamic-listeners"]

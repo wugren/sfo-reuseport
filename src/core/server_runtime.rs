@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -16,6 +16,7 @@ pub struct ServerRuntime {
 struct ServerRuntimeInner {
     workers: Vec<WorkerHandle>,
     active: Arc<AtomicBool>,
+    next_worker: AtomicUsize,
 }
 
 impl ServerRuntime {
@@ -36,8 +37,17 @@ impl ServerRuntime {
             inner: Arc::new(ServerRuntimeInner {
                 workers,
                 active: Arc::new(AtomicBool::new(true)),
+                next_worker: AtomicUsize::new(0),
             }),
         })
+    }
+
+    pub fn spawn<Fut>(&self, future: Fut) -> Result<runtime::TaskHandle, Error>
+    where
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let worker_id = self.random_worker_id()?;
+        self.submit_future_to_worker(worker_id, future)
     }
 
     pub(crate) fn worker_count(&self) -> usize {
@@ -113,6 +123,47 @@ impl ServerRuntime {
         Arc::clone(&self.inner.active)
     }
 
+    #[cfg(feature = "runtime-tokio-uring")]
+    fn submit_future_to_worker<Fut>(
+        &self,
+        worker_id: usize,
+        future: Fut,
+    ) -> Result<runtime::TaskHandle, Error>
+    where
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let worker = self.worker(worker_id)?;
+        worker
+            .submit(Box::new(move || Box::pin(future)))
+            .map_err(Error::from)
+    }
+
+    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
+    fn submit_future_to_worker<Fut>(
+        &self,
+        worker_id: usize,
+        future: Fut,
+    ) -> Result<runtime::TaskHandle, Error>
+    where
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let worker = self.worker(worker_id)?;
+        worker.submit(Box::pin(future)).map_err(Error::from)
+    }
+
+    fn random_worker_id(&self) -> Result<usize, Error> {
+        if !self.inner.active.load(Ordering::SeqCst) {
+            return Err(Error::Runtime("server runtime is stopped".to_string()));
+        }
+        let worker_count = self.worker_count();
+        if worker_count == 0 {
+            return Err(Error::Runtime(
+                "server runtime has no worker threads".to_string(),
+            ));
+        }
+        Ok(self.inner.next_worker.fetch_add(1, Ordering::Relaxed) % worker_count)
+    }
+
     fn worker(&self, worker_id: usize) -> Result<&WorkerHandle, Error> {
         self.inner
             .workers
@@ -169,4 +220,23 @@ fn start_worker(name: String) -> io::Result<WorkerHandle> {
         shutdown: Some(shutdown_sender),
         join: Some(join),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_rejects_runtime_after_shutdown_flag_is_cleared() {
+        let runtime =
+            ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+
+        runtime.inner.active.store(false, Ordering::SeqCst);
+
+        let result = runtime.spawn(async {});
+        assert!(matches!(
+            result,
+            Err(Error::Runtime(message)) if message == "server runtime is stopped"
+        ));
+    }
 }

@@ -1,3 +1,7 @@
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
 use sfo_reuseport::{
     QuicServer, ServerRuntime, ServerRuntimeConfig, TcpServer, TcpServiceConfig, UdpServer,
     UdpServiceConfig, WorkerCount,
@@ -26,6 +30,29 @@ fn server_runtime_does_not_depend_on_server_facades() {
     assert!(!source.contains("udp::"));
     assert!(!source.contains("crate::core::{tcp"));
     assert!(!source.contains("crate::core::{udp"));
+}
+
+#[test]
+fn server_runtime_spawn_accepts_direct_future_api() {
+    let source = include_str!("../../src/core/server_runtime.rs");
+    assert!(source.contains("pub fn spawn<Fut>(&self, future: Fut)"));
+    assert!(!source.contains("pub fn spawn<T, Fut>"));
+}
+
+#[test]
+fn server_runtime_spawn_runs_task_on_worker_runtime() {
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let caller_thread = thread::current().id();
+    let (sender, receiver) = mpsc::channel();
+
+    let _task = runtime
+        .spawn(async move {
+            sender.send(thread::current().id()).unwrap();
+        })
+        .unwrap();
+
+    let worker_thread = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_ne!(worker_thread, caller_thread);
 }
 
 #[test]
@@ -68,6 +95,7 @@ fn listener_dynamic_management_api_is_not_public() {
     assert!(!udp.contains("pub fn add_udp_listener"));
     assert!(!udp.contains("pub fn add_quic_listener"));
     assert!(!runtime.contains("pub fn remove_listener"));
+    assert!(!runtime.contains("pub fn submit_to_worker"));
     assert!(!runtime.contains("ListenerId"));
     assert!(!runtime.contains("ListenerProtocol"));
     assert!(!lib.contains("ListenerId"));
