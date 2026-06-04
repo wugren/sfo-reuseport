@@ -5,7 +5,7 @@ use sfo_reuseport::{
     Error, ServerRuntime, ServerRuntimeConfig, UdpServiceConfig, UdpServer, UdpSocket,
 };
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     run().await

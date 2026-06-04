@@ -74,7 +74,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--runtime",
-        choices=("runtime-tokio", "runtime-async-std", "runtime-tokio-uring"),
+        choices=("runtime-tokio", "runtime-async-std"),
         default="runtime-tokio",
     )
     args = parser.parse_args()

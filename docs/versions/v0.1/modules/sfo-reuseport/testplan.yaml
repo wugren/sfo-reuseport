@@ -31,7 +31,7 @@ levels:
         change_ids: ["CHG-runtime-features"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: tokio-uring-runtime-api
-        name: tokio-uring runtime 使用 tokio 网络 socket 类型契约
+        name: Tokio io_uring 外部控制不改变 tokio 网络 socket 类型且不依赖 tokio-uring crate
         change_ids: ["CHG-tokio-uring-runtime"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: worker-model
@@ -134,8 +134,8 @@ levels:
         name: async-std runtime feature 编译
         change_ids: ["CHG-runtime-features"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
-      - id: runtime-tokio-uring-feature
-        name: tokio-uring runtime feature Linux all-targets 编译并保持 tokio 网络接口
+      - id: tokio-external-io-uring-feature
+        name: runtime-tokio 加外部 tokio/io-uring all-targets 编译、注入 tokio_unstable cfg 并保持 tokio 网络接口
         change_ids: ["CHG-tokio-uring-runtime", "CHG-runtime-features"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "dv"]
       - id: quinn-feature-check

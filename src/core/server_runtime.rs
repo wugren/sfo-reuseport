@@ -54,11 +54,7 @@ impl ServerRuntime {
         self.inner.workers.len()
     }
 
-    #[cfg(any(
-        feature = "runtime-tokio",
-        feature = "runtime-async-std",
-        feature = "runtime-tokio-uring"
-    ))]
+    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
     pub(crate) fn submit_to_worker<T, Fut>(
         &self,
         worker_id: usize,
@@ -72,11 +68,7 @@ impl ServerRuntime {
         worker.submit(runtime::executor_task(task)).map_err(Error::from)
     }
 
-    #[cfg(any(
-        feature = "runtime-tokio",
-        feature = "runtime-async-std",
-        feature = "runtime-tokio-uring"
-    ))]
+    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
     pub(crate) fn submit_to_executor<T, Fut>(
         executor: &runtime::ExecutorHandle,
         task: T,
@@ -102,11 +94,7 @@ impl ServerRuntime {
         Arc::clone(&self.inner.active)
     }
 
-    #[cfg(any(
-        feature = "runtime-tokio",
-        feature = "runtime-async-std",
-        feature = "runtime-tokio-uring"
-    ))]
+    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
     fn submit_future_to_worker<Fut>(
         &self,
         worker_id: usize,

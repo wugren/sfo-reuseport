@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 
-RUNTIMES = ("runtime-tokio", "runtime-async-std", "runtime-tokio-uring")
+RUNTIMES = ("runtime-tokio", "runtime-async-std")
 
 
 def free_port() -> int:

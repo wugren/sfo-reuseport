@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, TcpServiceConfig, TcpServer};
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     run().await
@@ -27,7 +27,7 @@ async fn run() -> Result<(), Error> {
     std::future::pending::<Result<(), Error>>().await
 }
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 async fn echo_connection(stream: sfo_reuseport::TcpStream) -> Result<(), Error> {
     use std::io::ErrorKind;
 
@@ -44,7 +44,7 @@ async fn echo_connection(stream: sfo_reuseport::TcpStream) -> Result<(), Error> 
     }
 }
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 async fn write_all(stream: &sfo_reuseport::TcpStream, mut bytes: &[u8]) -> Result<(), Error> {
     use std::io::ErrorKind;
 

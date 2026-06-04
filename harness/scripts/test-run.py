@@ -4,18 +4,18 @@
 from __future__ import annotations
 
 import argparse
-import platform
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 
-TOKIO_URING_CHECK = [
+TOKIO_EXTERNAL_IO_URING_CHECK = [
     "cargo",
     "check",
     "--no-default-features",
     "--features",
-    "runtime-tokio-uring",
+    "runtime-tokio,tokio/io-uring",
     "--all-targets",
 ]
 
@@ -23,7 +23,6 @@ TOKIO_URING_CHECK = [
 RUNTIME_FEATURES = {
     "runtime-tokio": ["--no-default-features", "--features", "runtime-tokio"],
     "runtime-async-std": ["--no-default-features", "--features", "runtime-async-std"],
-    "runtime-tokio-uring": ["--no-default-features", "--features", "runtime-tokio-uring"],
 }
 
 
@@ -38,37 +37,36 @@ COMMANDS = {
             ["cargo", "test", "--lib", "--features", "quinn"],
             ["cargo", "test", "--test", "unit"],
             ["cargo", "test", "--test", "unit", "--features", "quinn"],
-            ["cargo", "test", "--no-default-features", "--features", "runtime-tokio-uring", "--test", "unit"],
         ],
         "dv": [
             ["cargo", "check"],
             cargo_check_example("tcp_echo", "runtime-tokio"),
             cargo_check_example("tcp_echo", "runtime-async-std"),
-            cargo_check_example("tcp_echo", "runtime-tokio-uring"),
             cargo_check_example("udp_server", "runtime-tokio"),
             cargo_check_example("udp_server", "runtime-async-std"),
-            cargo_check_example("udp_server", "runtime-tokio-uring"),
             cargo_check_example("udp_serve_socket", "runtime-tokio"),
             cargo_check_example("udp_serve_socket", "runtime-async-std"),
-            cargo_check_example("udp_serve_socket", "runtime-tokio-uring"),
             cargo_check_example("hyper_static", "runtime-tokio"),
             cargo_check_example("hyper_static", "runtime-async-std"),
-            cargo_check_example("hyper_static", "runtime-tokio-uring"),
             ["cargo", "check", "--no-default-features", "--features", "runtime-async-std", "--lib"],
             ["cargo", "check", "--features", "quinn"],
             ["cargo", "check", "--no-default-features", "--features", "runtime-async-std,quinn", "--lib"],
-            ["cargo", "check", "--no-default-features", "--features", "runtime-tokio-uring,quinn", "--lib"],
-            TOKIO_URING_CHECK,
+            ["python3", "./harness/scripts/assert-no-cargo-feature.py", "runtime-tokio-uring"],
+            TOKIO_EXTERNAL_IO_URING_CHECK,
+            [
+                "python3",
+                "./harness/scripts/assert-no-cargo-package.py",
+                "tokio-uring",
+                "--features",
+                "runtime-tokio,tokio/io-uring",
+            ],
             ["cargo", "test", "--test", "dv"],
             ["python3", "./harness/scripts/test-hyper-static-example.py", "--runtime", "runtime-tokio"],
             ["python3", "./harness/scripts/test-hyper-static-example.py", "--runtime", "runtime-async-std"],
-            ["python3", "./harness/scripts/test-hyper-static-example.py", "--runtime", "runtime-tokio-uring"],
             ["python3", "./harness/scripts/test-udp-server-example.py", "--runtime", "runtime-tokio"],
             ["python3", "./harness/scripts/test-udp-server-example.py", "--runtime", "runtime-async-std"],
-            ["python3", "./harness/scripts/test-udp-server-example.py", "--runtime", "runtime-tokio-uring"],
             ["python3", "./harness/scripts/test-udp-serve-socket-example.py", "--runtime", "runtime-tokio"],
             ["python3", "./harness/scripts/test-udp-serve-socket-example.py", "--runtime", "runtime-async-std"],
-            ["python3", "./harness/scripts/test-udp-serve-socket-example.py", "--runtime", "runtime-tokio-uring"],
         ],
         "integration": [
             ["cargo", "test", "--test", "integration", "--", "--test-threads=1"],
@@ -93,14 +91,16 @@ def main() -> int:
         for level in levels:
             commands = COMMANDS[module][level]
             for command in commands:
-                if any("runtime-tokio-uring" in part for part in command) and platform.system() != "Linux":
-                    print(
-                        f"test-run: {module} {level}: skip {' '.join(command)} "
-                        "(runtime-tokio-uring is Linux-only)"
-                    )
-                    continue
                 print(f"test-run: {module} {level}: {' '.join(command)}")
-                code = subprocess.run(command, cwd=root).returncode
+                env = None
+                if any("tokio/io-uring" in part for part in command):
+                    env = os.environ.copy()
+                    rustflags = env.get("RUSTFLAGS", "")
+                    flags = rustflags.split()
+                    if "--cfg" not in flags or "tokio_unstable" not in flags:
+                        flags.extend(["--cfg", "tokio_unstable"])
+                    env["RUSTFLAGS"] = " ".join(flags)
+                code = subprocess.run(command, cwd=root, env=env).returncode
                 if code != 0:
                     return code
     return 0

@@ -4,28 +4,28 @@ use std::net::SocketAddr;
 use std::path::{Component, PathBuf};
 use std::sync::Arc;
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 use bytes::Bytes;
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 use http_body_util::Full;
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 use hyper::body::Incoming;
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 use hyper::header::{CONTENT_TYPE, HeaderValue};
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 use hyper::server::conn::http1;
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 use hyper::service::service_fn;
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 use hyper::{Method, Request, Response, StatusCode};
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 use hyper_util::rt::TokioIo;
 use sfo_reuseport::{Error, ServerRuntime, ServerRuntimeConfig, TcpServiceConfig, TcpServer};
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 type Body = Full<Bytes>;
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     run_hyper().await
@@ -37,7 +37,7 @@ async fn main() -> Result<(), Error> {
     run_plain().await
 }
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 async fn run_hyper() -> Result<(), Error> {
     let args = Args::parse()?;
     let root = Arc::new(canonical_root(args.root)?);
@@ -237,7 +237,7 @@ async fn write_response(stream: &sfo_reuseport::TcpStream, response: Vec<u8>) ->
     Ok(())
 }
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 async fn serve_request(
     root: Arc<PathBuf>,
     request: Request<Incoming>,
@@ -249,7 +249,7 @@ async fn serve_request(
     })
 }
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 async fn response_for_path(root: &PathBuf, uri_path: &str, headers_only: bool) -> Response<Body> {
     let path = match resolve_path(root, uri_path) {
         Ok(path) => path,
@@ -354,7 +354,7 @@ fn from_hex(byte: u8) -> Result<u8, ResolveError> {
     }
 }
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 fn text_response(status: StatusCode, message: &'static str) -> Response<Body> {
     let mut response = Response::new(Full::new(Bytes::from_static(message.as_bytes())));
     *response.status_mut() = status;
@@ -364,7 +364,7 @@ fn text_response(status: StatusCode, message: &'static str) -> Response<Body> {
     response
 }
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 fn content_type(path: &std::path::Path) -> HeaderValue {
     HeaderValue::from_static(content_type_str(path))
 }

@@ -1,11 +1,7 @@
 use std::collections::HashMap;
 #[cfg(all(
     feature = "quinn",
-    any(
-        feature = "runtime-async-std",
-        feature = "runtime-tokio",
-        feature = "runtime-tokio-uring"
-    )
+    any(feature = "runtime-async-std", feature = "runtime-tokio")
 ))]
 use std::future::Future;
 use std::io;
@@ -63,9 +59,9 @@ type RoutedPacketSender = async_std::channel::Sender<RoutedPacket>;
 #[cfg(feature = "runtime-async-std")]
 type RoutedPacketReceiver = async_std::channel::Receiver<RoutedPacket>;
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 type RoutedPacketSender = tokio::sync::mpsc::Sender<RoutedPacket>;
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 type RoutedPacketReceiver = tokio::sync::Mutex<tokio::sync::mpsc::Receiver<RoutedPacket>>;
 
 impl UdpSocket {
@@ -220,7 +216,7 @@ impl RoutedUdpSocket {
                 io::Error::new(io::ErrorKind::UnexpectedEof, "routed UDP socket closed")
             })
         }
-        #[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+        #[cfg(feature = "runtime-tokio")]
         {
             self.receiver.lock().await.recv().await.ok_or_else(|| {
                 io::Error::new(io::ErrorKind::UnexpectedEof, "routed UDP socket closed")
@@ -281,7 +277,7 @@ impl RoutedUdpSocket {
                 Poll::Pending => Poll::Pending,
             };
         }
-        #[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+        #[cfg(feature = "runtime-tokio")]
         {
             let mut lock = Box::pin(self.receiver.lock());
             let mut receiver = match lock.as_mut().poll(cx) {
@@ -674,11 +670,7 @@ where
     Fut: HandlerFuture,
     R: Fn(&[u8], PacketMeta, usize) -> Option<usize> + Clone + Send + Sync + 'static,
 {
-    #[cfg(any(
-        feature = "runtime-tokio",
-        feature = "runtime-async-std",
-        feature = "runtime-tokio-uring"
-    ))]
+    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
     {
         if !runtime::SUPPORTS_USERSPACE_REUSEPORT_SIMULATION {
             return Err(Error::UnsupportedPlatformOption(
@@ -821,7 +813,7 @@ fn routed_packet_channel(capacity: usize) -> (RoutedPacketSender, RoutedPacketRe
     async_std::channel::bounded(capacity)
 }
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 fn routed_packet_channel(capacity: usize) -> (RoutedPacketSender, RoutedPacketReceiver) {
     let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
     (sender, tokio::sync::Mutex::new(receiver))
@@ -835,7 +827,7 @@ async fn send_routed_packet(
     sender.send(packet).await.map_err(|_| ())
 }
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-tokio-uring"))]
+#[cfg(feature = "runtime-tokio")]
 async fn send_routed_packet(
     sender: &RoutedPacketSender,
     packet: RoutedPacket,
@@ -988,11 +980,7 @@ pub(crate) async fn submit_udp_handler(
     handler: UdpHandler,
     permit: ConcurrencyPermit,
 ) -> Result<(), Error> {
-    #[cfg(any(
-        feature = "runtime-tokio",
-        feature = "runtime-async-std",
-        feature = "runtime-tokio-uring"
-    ))]
+    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
     {
         runtime::submit_or_run_local(
             executor,

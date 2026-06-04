@@ -1,5 +1,3 @@
-#![cfg(not(feature = "runtime-tokio-uring"))]
-
 #[path = "integration/dynamic_listeners.rs"]
 mod dynamic_listeners;
 #[path = "integration/quic_routed_udp.rs"]

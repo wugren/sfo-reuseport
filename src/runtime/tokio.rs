@@ -102,9 +102,9 @@ pub(crate) struct ExecutorHandle {
 
 impl CurrentThreadExecutor {
     pub fn new() -> io::Result<Self> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
+        let mut builder = tokio::runtime::Builder::new_current_thread();
+        builder.enable_all();
+        let runtime = builder.build()?;
         let (task_sender, task_receiver) = tokio::sync::mpsc::unbounded_channel();
         Ok(Self {
             inner: CurrentThreadExecutorInner::Runtime {
