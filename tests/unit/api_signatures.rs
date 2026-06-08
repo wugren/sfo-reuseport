@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::future::Future;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -11,22 +13,29 @@ use sfo_reuseport::DEFAULT_ROUTED_PACKET_CHANNEL_CAPACITY;
 
 fn assert_tcp_handler<F, Fut>(_handler: F)
 where
-    F: Fn(TcpStream) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = Result<(), Error>> + Send + 'static,
+    F: Clone + Send + Sync + 'static + Fn(TcpStream) -> Fut,
+    Fut: Future<Output = Result<(), Error>> + 'static,
 {
 }
 
 fn assert_udp_handler<F, Fut>(_handler: F)
 where
-    F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = Result<(), Error>> + Send + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut,
+    Fut: Future<Output = Result<(), Error>> + 'static,
+{
+}
+
+fn assert_quic_handler<F, Fut>(_handler: F)
+where
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut,
+    Fut: Future<Output = Result<(), Error>> + 'static,
 {
 }
 
 fn assert_socket_callback<F, Fut>(_callback: F)
 where
-    F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = Result<(), Error>> + Send + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, usize) -> Fut,
+    Fut: Future<Output = Result<(), Error>> + 'static,
 {
 }
 
@@ -34,6 +43,42 @@ where
 fn regular_callback_signatures_do_not_include_worker_id() {
     assert_tcp_handler(|_stream| async { Ok(()) });
     assert_udp_handler(|_socket, _meta, _payload| async { Ok(()) });
+}
+
+#[test]
+fn tcp_udp_handlers_allow_non_send_futures() {
+    assert_tcp_handler(|_stream| {
+        let count = Rc::new(RefCell::new(0_usize));
+        async move {
+            *count.borrow_mut() += 1;
+            Ok(())
+        }
+    });
+    assert_quic_handler(|_socket, _meta, _payload| {
+        let count = Rc::new(RefCell::new(0_usize));
+        async move {
+            *count.borrow_mut() += 1;
+            Ok(())
+        }
+    });
+}
+
+#[test]
+fn socket_only_and_quic_handlers_allow_non_send_futures() {
+    assert_socket_callback(|_socket, _worker_id| {
+        let count = Rc::new(RefCell::new(0_usize));
+        async move {
+            *count.borrow_mut() += 1;
+            Ok(())
+        }
+    });
+    assert_udp_handler(|_socket, _meta, _payload| {
+        let count = Rc::new(RefCell::new(0_usize));
+        async move {
+            *count.borrow_mut() += 1;
+            Ok(())
+        }
+    });
 }
 
 #[test]

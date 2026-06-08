@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::core::{
-    ConcurrencyPermit, Error, HandlerFuture, HandlerFutureBox, ServerRuntime, UdpServiceConfig,
-    TransparentMode, WorkerConcurrencyLimit, linux_reuseport_select,
+    ConcurrencyPermit, Error, HandlerFuture, HandlerFutureBox, ServerRuntime, TransparentMode,
+    UdpServiceConfig, WorkerConcurrencyLimit, linux_reuseport_select,
 };
 use crate::platform;
 use crate::runtime;
@@ -332,7 +332,7 @@ impl UdpServer {
         handler: F,
     ) -> Result<Self, Error>
     where
-        F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
+        F: Clone + Send + Sync + 'static + Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut,
         Fut: HandlerFuture,
     {
         config.validate()?;
@@ -363,7 +363,7 @@ impl UdpServer {
         callback: F,
     ) -> Result<Self, Error>
     where
-        F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
+        F: Clone + Send + Sync + 'static + Fn(UdpSocket, usize) -> Fut,
         Fut: HandlerFuture,
     {
         config.validate()?;
@@ -520,7 +520,7 @@ fn add_reuse_port_listener<F, Fut>(
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
-    F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut,
     Fut: HandlerFuture,
 {
     let sockets = platform::bind_udp_workers(&service_config, runtime.worker_count())?;
@@ -540,7 +540,7 @@ where
         let task_state = Arc::clone(&state);
         let handler = Arc::clone(&handler);
         let limit = WorkerConcurrencyLimit::new(max_concurrency);
-        let task = runtime.submit_to_worker(worker_id, move || async move {
+        let task = runtime.submit_to_worker(worker_id, move || Box::pin(async move {
             if task_state.register_listener_socket(&socket).is_err() {
                 return;
             }
@@ -559,7 +559,7 @@ where
                 transparent_receive,
             )
             .await;
-        })?;
+        }))?;
         state.register_task(task)?;
     }
 
@@ -573,7 +573,7 @@ fn add_socket_callback_reuse_port_listener<F, Fut>(
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
-    F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, usize) -> Fut,
     Fut: HandlerFuture,
 {
     let sockets = platform::bind_udp_workers(&service_config, runtime.worker_count())?;
@@ -584,21 +584,29 @@ where
     }
 
     let callback = socket_callback(callback);
+    let worker_executors = runtime.worker_executors();
     for (worker_id, socket) in sockets.into_iter().enumerate() {
         let task_state = Arc::clone(&state);
         let callback = Arc::clone(&callback);
-        let task = runtime.submit_to_worker(worker_id, move || async move {
-            if task_state.register_listener_socket(&socket).is_err() {
-                return;
-            }
-            let Ok(socket) = runtime::udp_socket_from_std(socket)
-                .map(UdpSocket::from_runtime)
-                .map_err(Error::from)
-            else {
-                return;
-            };
-            let _ = callback(socket, worker_id).await;
-        })?;
+        let Some(executor) = worker_executors.get(worker_id) else {
+            return Err(Error::InvalidConfig("worker index is out of range".to_string()));
+        };
+        let task = ServerRuntime::submit_to_executor(
+            executor,
+            move || Box::pin(async move {
+                if task_state.register_listener_socket(&socket).is_err() {
+                    return;
+                }
+                let Ok(socket) = runtime::udp_socket_from_std(socket)
+                    .map(UdpSocket::from_runtime)
+                    .map_err(Error::from)
+                else {
+                    return;
+                };
+                let _ = callback(socket, worker_id).await;
+            },
+        ))
+        ?;
         state.register_callback_task(task)?;
     }
 
@@ -612,7 +620,7 @@ fn add_simulated_listener<F, Fut>(
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
-    F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut,
     Fut: HandlerFuture,
 {
     if !runtime::SUPPORTS_USERSPACE_REUSEPORT_SIMULATION {
@@ -631,7 +639,7 @@ where
     let limits = worker_limits(worker_count, service_config.max_concurrency_per_worker);
     let handler = udp_handler(handler);
     let task_state = Arc::clone(&state);
-    let task = runtime.submit_to_worker(0, move || async move {
+    let task = runtime.submit_to_worker(0, move || Box::pin(async move {
         if task_state.register_listener_socket(&socket).is_err() {
             return;
         }
@@ -652,7 +660,7 @@ where
             transparent_receive,
         )
         .await;
-    })?;
+    }))?;
     state.register_task(task)?;
 
     Ok(())
@@ -666,11 +674,10 @@ pub(crate) fn add_socket_callback_simulated_listener<F, Fut, R>(
     route_packet: R,
 ) -> Result<(), Error>
 where
-    F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, usize) -> Fut,
     Fut: HandlerFuture,
     R: Fn(&[u8], PacketMeta, usize) -> Option<usize> + Clone + Send + Sync + 'static,
 {
-    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
     {
         if !runtime::SUPPORTS_USERSPACE_REUSEPORT_SIMULATION {
             return Err(Error::UnsupportedPlatformOption(
@@ -702,14 +709,21 @@ where
                 local_addr,
             });
             let callback = Arc::clone(&callback);
-            let task = runtime.submit_to_worker(worker_id, move || async move {
-                let _ = callback(routed_socket, worker_id).await;
-            })?;
+            let Some(executor) = runtime.worker_executors().get(worker_id).cloned() else {
+                return Err(Error::InvalidConfig("worker index is out of range".to_string()));
+            };
+            let task = ServerRuntime::submit_to_executor(
+                &executor,
+                move || Box::pin(async move {
+                    let _ = callback(routed_socket, worker_id).await;
+                },
+            ))
+            ?;
             state.register_callback_task(task)?;
         }
 
         let active = state.active_flag();
-        let task = runtime.submit_to_worker(0, move || async move {
+        let task = runtime.submit_to_worker(0, move || Box::pin(async move {
             let Ok(socket) = runtime::udp_socket_from_std(socket)
                 .map(UdpSocket::from_runtime)
                 .map_err(Error::from)
@@ -726,7 +740,7 @@ where
                 transparent_receive,
             )
             .await;
-        })?;
+        }))?;
         state.register_task(task)?;
 
         Ok(())
@@ -735,7 +749,7 @@ where
 
 pub(crate) fn udp_handler<F, Fut>(handler: F) -> UdpHandler
 where
-    F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut,
     Fut: HandlerFuture,
 {
     Arc::new(move |socket, meta, payload| {
@@ -746,7 +760,7 @@ where
 
 pub(crate) fn socket_callback<F, Fut>(callback: F) -> SocketCallback
 where
-    F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, usize) -> Fut,
     Fut: HandlerFuture,
 {
     Arc::new(move |socket, worker_id| {
@@ -980,18 +994,15 @@ pub(crate) async fn submit_udp_handler(
     handler: UdpHandler,
     permit: ConcurrencyPermit,
 ) -> Result<(), Error> {
-    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
     {
-        runtime::submit_or_run_local(
+        ServerRuntime::submit_to_executor(
             executor,
-            move || async move {
+            move || Box::pin(async move {
                 let _permit = permit;
                 let _ = handler(socket, meta, payload).await;
             },
-            async {},
-        )
-        .await
-        .map_err(Error::from)
+        ))
+        .map(|_| ())
     }
 
 }

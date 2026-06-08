@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -54,32 +55,26 @@ impl ServerRuntime {
         self.inner.workers.len()
     }
 
-    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
-    pub(crate) fn submit_to_worker<T, Fut>(
+    pub(crate) fn submit_to_worker<T>(
         &self,
         worker_id: usize,
         task: T,
     ) -> Result<runtime::TaskHandle, Error>
     where
-        T: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        T: FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
     {
         let worker = self.worker(worker_id)?;
-        worker.submit(runtime::executor_task(task)).map_err(Error::from)
+        worker.submit(task).map_err(Error::from)
     }
 
-    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
-    pub(crate) fn submit_to_executor<T, Fut>(
+    pub(crate) fn submit_to_executor<T>(
         executor: &runtime::ExecutorHandle,
         task: T,
     ) -> Result<runtime::TaskHandle, Error>
     where
-        T: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = ()> + Send + 'static,
+        T: FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
     {
-        executor
-            .spawn_task(runtime::executor_task(task))
-            .map_err(Error::from)
+        executor.spawn_task(task).map_err(Error::from)
     }
 
     pub(crate) fn worker_executors(&self) -> Vec<runtime::ExecutorHandle> {
@@ -94,7 +89,6 @@ impl ServerRuntime {
         Arc::clone(&self.inner.active)
     }
 
-    #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
     fn submit_future_to_worker<Fut>(
         &self,
         worker_id: usize,
@@ -104,7 +98,7 @@ impl ServerRuntime {
         Fut: Future<Output = ()> + Send + 'static,
     {
         let worker = self.worker(worker_id)?;
-        worker.submit(Box::pin(future)).map_err(Error::from)
+        worker.submit_future(future).map_err(Error::from)
     }
 
     fn random_worker_id(&self) -> Result<usize, Error> {
@@ -141,8 +135,18 @@ struct WorkerHandle {
 }
 
 impl WorkerHandle {
-    fn submit(&self, task: runtime::ExecutorTask) -> io::Result<runtime::TaskHandle> {
+    fn submit<T>(&self, task: T) -> io::Result<runtime::TaskHandle>
+    where
+        T: FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+    {
         self.executor.spawn_task(task)
+    }
+
+    fn submit_future<Fut>(&self, future: Fut) -> io::Result<runtime::TaskHandle>
+    where
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.executor.spawn(future)
     }
 }
 

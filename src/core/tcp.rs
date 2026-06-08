@@ -17,6 +17,7 @@ pub struct TcpServer {
 }
 
 struct TcpServerState {
+    active: Arc<AtomicBool>,
     tasks: Mutex<Vec<runtime::TaskHandle>>,
 }
 
@@ -27,7 +28,7 @@ impl TcpServer {
         handler: F,
     ) -> Result<Self, Error>
     where
-        F: Fn(TcpStream) -> Fut + Clone + Send + Sync + 'static,
+        F: Clone + Send + Sync + 'static + Fn(TcpStream) -> Fut,
         Fut: HandlerFuture,
     {
         config.validate()?;
@@ -51,6 +52,7 @@ impl TcpServer {
 impl TcpServerState {
     fn new() -> Self {
         Self {
+            active: Arc::new(AtomicBool::new(true)),
             tasks: Mutex::new(Vec::new()),
         }
     }
@@ -64,11 +66,16 @@ impl TcpServerState {
     }
 
     fn close(&self) {
+        self.active.store(false, Ordering::SeqCst);
         if let Ok(mut tasks) = self.tasks.lock() {
             for task in tasks.drain(..) {
                 task.cancel();
             }
         }
+    }
+
+    fn active_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.active)
     }
 }
 
@@ -79,7 +86,7 @@ fn add_reuse_port_listener<F, Fut>(
     state: Arc<TcpServerState>,
 ) -> Result<(), Error>
 where
-    F: Fn(TcpStream) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(TcpStream) -> Fut,
     Fut: HandlerFuture,
 {
     let listeners = platform::bind_tcp_workers(&service_config, runtime.worker_count())?;
@@ -94,15 +101,16 @@ where
     let handler = tcp_handler(handler);
     for (worker_id, listener) in listeners.into_iter().enumerate() {
         let runtime_active = Arc::clone(&runtime_active);
+        let server_active = state.active_flag();
         let handler = Arc::clone(&handler);
         let limit = WorkerConcurrencyLimit::new(max_concurrency);
-        let task = runtime.submit_to_worker(worker_id, move || async move {
+        let task = runtime.submit_to_worker(worker_id, move || Box::pin(async move {
             let Ok(listener) = runtime::tcp_listener_from_std(listener).map_err(Error::from)
             else {
                 return;
             };
-            tcp_listener_loop(listener, runtime_active, handler, limit).await;
-        })?;
+            tcp_listener_loop(listener, runtime_active, server_active, handler, limit).await;
+        }))?;
         state.register_task(task)?;
     }
 
@@ -116,7 +124,7 @@ fn add_simulated_listener<F, Fut>(
     state: Arc<TcpServerState>,
 ) -> Result<(), Error>
 where
-    F: Fn(TcpStream) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(TcpStream) -> Fut,
     Fut: HandlerFuture,
 {
     if !runtime::SUPPORTS_USERSPACE_REUSEPORT_SIMULATION {
@@ -128,18 +136,20 @@ where
     let listener = platform::bind_tcp(&service_config)?;
     let addr = listener.local_addr().map_err(Error::from)?;
     let runtime_active = runtime.active_flag();
+    let server_active = state.active_flag();
 
     let worker_executors = runtime.worker_executors();
     let worker_count = worker_executors.len();
     let limits = worker_limits(worker_count, service_config.max_concurrency_per_worker);
     let handler = tcp_handler(handler);
-    let task = runtime.submit_to_worker(0, move || async move {
+    let task = runtime.submit_to_worker(0, move || Box::pin(async move {
         let Ok(listener) = runtime::tcp_listener_from_std(listener).map_err(Error::from) else {
             return;
         };
         simulated_tcp_accept_loop(
             listener,
             runtime_active,
+            server_active,
             worker_executors,
             worker_count,
             addr,
@@ -147,7 +157,7 @@ where
             limits,
         )
         .await;
-    })?;
+    }))?;
     state.register_task(task)?;
 
     Ok(())
@@ -155,7 +165,7 @@ where
 
 fn tcp_handler<F, Fut>(handler: F) -> TcpHandler
 where
-    F: Fn(TcpStream) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(TcpStream) -> Fut,
     Fut: HandlerFuture,
 {
     Arc::new(move |stream| {
@@ -167,18 +177,19 @@ where
 async fn tcp_listener_loop(
     listener: runtime::TcpListener,
     runtime_active: Arc<AtomicBool>,
+    server_active: Arc<AtomicBool>,
     handler: TcpHandler,
     limit: WorkerConcurrencyLimit,
 ) {
-    while is_active(&runtime_active) {
+    while is_active(&runtime_active, &server_active) {
         let permit = limit.acquire().await;
-        if !is_active(&runtime_active) {
+        if !is_active(&runtime_active, &server_active) {
             break;
         }
         let Ok((stream, _)) = listener.accept().await else {
             break;
         };
-        if !is_active(&runtime_active) {
+        if !is_active(&runtime_active, &server_active) {
             break;
         }
         if spawn_tcp_handler(stream, Arc::clone(&handler), permit).is_err() {
@@ -190,17 +201,18 @@ async fn tcp_listener_loop(
 async fn simulated_tcp_accept_loop(
     listener: runtime::TcpListener,
     runtime_active: Arc<AtomicBool>,
+    server_active: Arc<AtomicBool>,
     worker_executors: Vec<runtime::ExecutorHandle>,
     worker_count: usize,
     local_addr: std::net::SocketAddr,
     handler: TcpHandler,
     limits: Vec<WorkerConcurrencyLimit>,
 ) {
-    while is_active(&runtime_active) {
+    while is_active(&runtime_active, &server_active) {
         let Ok((stream, peer_addr)) = listener.accept().await else {
             break;
         };
-        if !is_active(&runtime_active) {
+        if !is_active(&runtime_active, &server_active) {
             break;
         }
         let meta = PacketMeta {
@@ -221,19 +233,18 @@ async fn simulated_tcp_accept_loop(
             continue;
         };
         let handler = Arc::clone(&handler);
-        #[cfg(any(feature = "runtime-tokio", feature = "runtime-async-std"))]
-        let submit_result = ServerRuntime::submit_to_executor(executor, move || async move {
+        let submit_result = ServerRuntime::submit_to_executor(executor, move || Box::pin(async move {
             let _permit = permit;
             let _ = handler(stream).await;
-        });
+        }));
         if submit_result.is_err() {
             break;
         }
     }
 }
 
-fn is_active(runtime_active: &AtomicBool) -> bool {
-    runtime_active.load(Ordering::SeqCst)
+fn is_active(runtime_active: &AtomicBool, server_active: &AtomicBool) -> bool {
+    runtime_active.load(Ordering::SeqCst) && server_active.load(Ordering::SeqCst)
 }
 
 fn worker_limits(worker_count: usize, max: Option<usize>) -> Vec<WorkerConcurrencyLimit> {

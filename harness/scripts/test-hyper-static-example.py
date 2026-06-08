@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import os
 import socket
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from pathlib import Path
 
 
 RUNTIMES = ("runtime-tokio", "runtime-async-std")
+SERVER_START_TIMEOUT = float(os.environ.get("SFO_REUSEPORT_EXAMPLE_START_TIMEOUT", "120"))
 
 
 def free_port() -> int:
@@ -23,7 +25,7 @@ def free_port() -> int:
 
 
 def wait_for_server(port: int, process: subprocess.Popen[bytes]) -> None:
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + SERVER_START_TIMEOUT
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited early with code {process.returncode}")
@@ -32,7 +34,9 @@ def wait_for_server(port: int, process: subprocess.Popen[bytes]) -> None:
                 return
         except OSError:
             time.sleep(0.1)
-    raise RuntimeError("server did not start before timeout")
+    raise RuntimeError(
+        f"server did not start before {SERVER_START_TIMEOUT:.1f}s timeout"
+    )
 
 
 def request(port: int, path: str) -> tuple[int, bytes]:
@@ -81,6 +85,7 @@ def main() -> int:
             stderr=subprocess.PIPE,
         )
 
+        failure: BaseException | None = None
         try:
             wait_for_server(port, process)
 
@@ -103,6 +108,9 @@ def main() -> int:
             status, _ = request(port, "/%2e%2e/Cargo.toml")
             if status != 403:
                 raise AssertionError(f"expected 403 for encoded path traversal, got {status}")
+        except BaseException as error:
+            failure = error
+            raise
         finally:
             process.terminate()
             try:
@@ -112,7 +120,7 @@ def main() -> int:
                 process.wait(timeout=5)
 
             stderr = process.stderr.read().decode("utf-8", errors="replace")
-            if process.returncode not in (0, -15, 143):
+            if failure is not None or process.returncode not in (0, -15, 143):
                 print(stderr, file=sys.stderr)
 
     print(f"hyper_static example smoke test passed for {args.runtime}")

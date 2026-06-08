@@ -1,6 +1,6 @@
 [package]
 name = "sfo-reuseport"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 rust-version = "1.85"
 description = "Multi-worker TCP and UDP services with reuse-port style socket distribution"
@@ -29,7 +29,7 @@ runtime-async-std = ["dep:async-executor", "dep:async-std", "async-std/unstable"
 async-executor = { version = "1.14", optional = true }
 async-std = { version = "1.13", optional = true, features = ["attributes"] }
 atomic-waker = "1.1"
-getrandom = "0.3"
+getrandom = "0.4"
 libc = "0.2"
 num_cpus = "1.17"
 socket2 = { version = "0.6", features = ["all"] }

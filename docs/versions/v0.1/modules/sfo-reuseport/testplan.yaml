@@ -62,6 +62,10 @@ levels:
         name: TCP UDP QUIC 常规回调不暴露 worker id
         change_ids: ["CHG-worker-model", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: worker-local-handler-futures
+        name: TCP UDP 常规 handler future 支持 Rc RefCell 且不要求 Send
+        change_ids: ["CHG-serve-local-handlers", "CHG-tcp-serve", "CHG-udp-runtime-socket"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: udp-runtime-socket-api
         name: UDP handler 和 server listener 统一 UdpSocket API 契约
         change_ids: ["CHG-udp-runtime-socket", "CHG-dynamic-listeners", "CHG-quic-routed-udp"]

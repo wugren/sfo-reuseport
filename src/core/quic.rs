@@ -21,7 +21,7 @@ impl QuicServer {
         handler: F,
     ) -> Result<Self, Error>
     where
-        F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
+        F: Clone + Send + Sync + 'static + Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut,
         Fut: HandlerFuture,
     {
         config.validate()?;
@@ -48,7 +48,7 @@ impl QuicServer {
         callback: F,
     ) -> Result<Self, Error>
     where
-        F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
+        F: Clone + Send + Sync + 'static + Fn(UdpSocket, usize) -> Fut,
         Fut: HandlerFuture,
     {
         config.validate()?;
@@ -68,7 +68,7 @@ fn add_quic_socket_callback_listener<F, Fut>(
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
-    F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, usize) -> Fut,
     Fut: HandlerFuture,
 {
     if platform::capabilities().reuse_port_balancing {
@@ -98,7 +98,7 @@ fn add_quic_socket_callback_reuseport_bpf_listener<F, Fut>(
     state: Arc<UdpServerState>,
 ) -> Result<bool, Error>
 where
-    F: Fn(UdpSocket, usize) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, usize) -> Fut,
     Fut: HandlerFuture,
 {
     let Some(sockets) =
@@ -113,21 +113,29 @@ where
     }
 
     let callback = socket_callback(callback);
+    let worker_executors = runtime.worker_executors();
     for (worker_id, socket) in sockets.into_iter().enumerate() {
         let task_state = Arc::clone(&state);
         let callback = Arc::clone(&callback);
-        let task = runtime.submit_to_worker(worker_id, move || async move {
-            if task_state.register_listener_socket(&socket).is_err() {
-                return;
-            }
-            let Ok(socket) = runtime::udp_socket_from_std(socket)
-                .map(UdpSocket::from_runtime)
-                .map_err(Error::from)
-            else {
-                return;
-            };
-            let _ = callback(socket, worker_id).await;
-        })?;
+        let Some(executor) = worker_executors.get(worker_id) else {
+            return Err(Error::InvalidConfig("worker index is out of range".to_string()));
+        };
+        let task = ServerRuntime::submit_to_executor(
+            executor,
+            move || Box::pin(async move {
+                if task_state.register_listener_socket(&socket).is_err() {
+                    return;
+                }
+                let Ok(socket) = runtime::udp_socket_from_std(socket)
+                    .map(UdpSocket::from_runtime)
+                    .map_err(Error::from)
+                else {
+                    return;
+                };
+                let _ = callback(socket, worker_id).await;
+            },
+        ))
+        ?;
         state.register_callback_task(task)?;
     }
 
@@ -141,7 +149,7 @@ fn add_quic_routed_listener<F, Fut>(
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
-    F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut,
     Fut: HandlerFuture,
 {
     if platform::capabilities().reuse_port_balancing {
@@ -158,7 +166,7 @@ fn add_quic_reuseport_listener<F, Fut>(
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
-    F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut,
     Fut: HandlerFuture,
 {
     if add_quic_reuseport_bpf_listener(
@@ -180,7 +188,7 @@ fn add_quic_simulated_listener<F, Fut>(
     state: Arc<UdpServerState>,
 ) -> Result<(), Error>
 where
-    F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut,
     Fut: HandlerFuture,
 {
     if !runtime::SUPPORTS_USERSPACE_REUSEPORT_SIMULATION {
@@ -198,7 +206,7 @@ where
     let limits = worker_limits(worker_count, service_config.max_concurrency_per_worker);
     let handler = udp_handler(handler);
     let task_state = Arc::clone(&state);
-    let task = runtime.submit_to_worker(0, move || async move {
+    let task = runtime.submit_to_worker(0, move || Box::pin(async move {
         if task_state.register_listener_socket(&socket).is_err() {
             return;
         }
@@ -218,7 +226,7 @@ where
             limits,
         )
         .await;
-    })?;
+    }))?;
     state.register_task(task)?;
 
     Ok(())
@@ -231,7 +239,7 @@ fn add_quic_reuseport_bpf_listener<F, Fut>(
     state: Arc<UdpServerState>,
 ) -> Result<bool, Error>
 where
-    F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut,
     Fut: HandlerFuture,
 {
     let Some(sockets) =
@@ -255,7 +263,7 @@ where
         let handler = Arc::clone(&handler);
         let worker_count = runtime.worker_count();
         let limit = WorkerConcurrencyLimit::new(max_concurrency);
-        let task = runtime.submit_to_worker(worker_id, move || async move {
+        let task = runtime.submit_to_worker(worker_id, move || Box::pin(async move {
             if task_state.register_listener_socket(&socket).is_err() {
                 return;
             }
@@ -274,7 +282,7 @@ where
                 limit,
             )
             .await;
-        })?;
+        }))?;
         state.register_task(task)?;
     }
 

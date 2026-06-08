@@ -4,8 +4,8 @@ use sfo_reuseport::{Error, PacketMeta, QuicCidGenerator, UdpSocket};
 
 fn assert_quic_udp_handler<F, Fut>(_handler: F)
 where
-    F: Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = Result<(), Error>> + Send + 'static,
+    F: Clone + Send + Sync + 'static + Fn(UdpSocket, PacketMeta, Vec<u8>) -> Fut,
+    Fut: Future<Output = Result<(), Error>> + 'static,
 {
 }
 

@@ -7,8 +7,8 @@ use std::net::{
     SocketAddr,
     TcpListener as StdTcpListener, TcpStream as StdTcpStream, UdpSocket as StdUdpSocket,
 };
-use std::pin::Pin;
 use std::sync::Arc;
+use std::thread::{self, ThreadId};
 
 pub type TcpListener = async_std::net::TcpListener;
 pub type TcpStream = async_std::net::TcpStream;
@@ -17,7 +17,6 @@ pub(crate) const SUPPORTS_USERSPACE_REUSEPORT_SIMULATION: bool = true;
 
 pub(crate) struct ShutdownSender(async_std::channel::Sender<()>);
 pub(crate) type ShutdownReceiver = async_std::channel::Receiver<()>;
-pub(crate) type ExecutorTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 pub(crate) type ExecutorHandle = CurrentThreadExecutor;
 
 pub struct TaskHandle {
@@ -54,22 +53,12 @@ impl Drop for TaskHandle {
     }
 }
 
-pub(crate) fn executor_task<F, Fut>(task: F) -> ExecutorTask
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = ()> + Send + 'static,
-{
-    Box::pin(task())
-}
-
 pub fn spawn_local<F>(future: F) -> io::Result<TaskHandle>
 where
     F: Future<Output = ()> + 'static,
 {
     CURRENT_EXECUTOR.with(|current| match current.borrow().as_ref() {
-        Some(_) => Ok(TaskHandle {
-            task: Some(TaskHandleInner::Local(async_std::task::spawn_local(future))),
-        }),
+        Some(executor) => executor.local_spawn_task(future),
         None => Err(io::Error::new(
             io::ErrorKind::NotConnected,
             "no current sfo-reuseport async-std executor on this thread",
@@ -95,12 +84,14 @@ thread_local! {
 #[derive(Clone)]
 pub struct CurrentThreadExecutor {
     executor: Arc<async_executor::Executor<'static>>,
+    owner_thread: ThreadId,
 }
 
 impl CurrentThreadExecutor {
     pub fn new() -> io::Result<Self> {
         Ok(Self {
             executor: Arc::new(async_executor::Executor::new()),
+            owner_thread: thread::current().id(),
         })
     }
 
@@ -129,8 +120,33 @@ impl CurrentThreadExecutor {
         })
     }
 
-    pub(crate) fn spawn_task(&self, task: ExecutorTask) -> io::Result<TaskHandle> {
-        self.spawn(task)
+    pub(crate) fn spawn_task<T, Fut>(&self, task: T) -> io::Result<TaskHandle>
+    where
+        T: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        if thread::current().id() == self.owner_thread {
+            return self.local_spawn_task(task());
+        }
+        let executor = self.clone();
+        self.spawn(async move {
+            let _ = executor.local_spawn_task(task());
+        })
+    }
+
+    pub(crate) fn local_spawn_task<F>(&self, future: F) -> io::Result<TaskHandle>
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        if thread::current().id() != self.owner_thread {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "local task must be spawned on the executor owner thread",
+            ));
+        }
+        Ok(TaskHandle {
+            task: Some(TaskHandleInner::Local(async_std::task::spawn_local(future))),
+        })
     }
 
     pub(crate) fn park_until_shutdown(&self, shutdown: ShutdownReceiver) {
@@ -138,19 +154,6 @@ impl CurrentThreadExecutor {
             let _ = shutdown.recv().await;
         });
     }
-}
-
-pub(crate) async fn submit_or_run_local<T, TaskFut, LocalFut>(
-    executor: &ExecutorHandle,
-    task: T,
-    _local: LocalFut,
-) -> io::Result<()>
-where
-    T: FnOnce() -> TaskFut + Send + 'static,
-    TaskFut: Future<Output = ()> + Send + 'static,
-    LocalFut: Future<Output = ()>,
-{
-    executor.spawn_task(executor_task(task)).map(|_| ())
 }
 
 pub fn tcp_listener_from_std(listener: StdTcpListener) -> io::Result<TcpListener> {

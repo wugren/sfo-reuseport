@@ -30,15 +30,15 @@ pub(crate) use concurrency::{ConcurrencyPermit, WorkerConcurrencyLimit};
     feature = "runtime-tokio",
     feature = "runtime-async-std",
 ))]
-pub(crate) type HandlerFutureBox = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+pub(crate) type HandlerFutureBox = Pin<Box<dyn Future<Output = Result<(), Error>>>>;
 
 #[cfg(any(
     feature = "runtime-tokio",
     feature = "runtime-async-std",
 ))]
-pub trait HandlerFuture: Future<Output = Result<(), Error>> + Send + 'static {}
+pub trait HandlerFuture: Future<Output = Result<(), Error>> + 'static {}
 #[cfg(any(
     feature = "runtime-tokio",
     feature = "runtime-async-std",
 ))]
-impl<T> HandlerFuture for T where T: Future<Output = Result<(), Error>> + Send + 'static {}
+impl<T> HandlerFuture for T where T: Future<Output = Result<(), Error>> + 'static {}

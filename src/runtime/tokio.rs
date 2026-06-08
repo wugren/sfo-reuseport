@@ -8,8 +8,8 @@ use std::net::{
     TcpListener as StdTcpListener, TcpStream as StdTcpStream, UdpSocket as StdUdpSocket,
 };
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread::{self, ThreadId};
 
 pub type TcpListener = tokio::net::TcpListener;
@@ -19,7 +19,9 @@ pub(crate) const SUPPORTS_USERSPACE_REUSEPORT_SIMULATION: bool = true;
 
 pub(crate) struct ShutdownSender(tokio::sync::oneshot::Sender<()>);
 pub(crate) type ShutdownReceiver = tokio::sync::oneshot::Receiver<()>;
-pub(crate) type ExecutorTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type LocalTask = Pin<Box<dyn Future<Output = ()> + 'static>>;
+type BoxedExecutorTask = Box<dyn FnOnce() -> LocalTask + Send + 'static>;
+type TaskCompletionSender = tokio::sync::mpsc::UnboundedSender<u64>;
 
 pub struct TaskHandle {
     inner: TaskHandleInner,
@@ -42,14 +44,6 @@ impl TaskHandle {
             }
         }
     }
-}
-
-pub(crate) fn executor_task<F, Fut>(task: F) -> ExecutorTask
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = ()> + Send + 'static,
-{
-    Box::pin(task())
 }
 
 pub fn spawn_local<F>(future: F) -> io::Result<TaskHandle>
@@ -82,13 +76,25 @@ enum CurrentThreadExecutorInner {
 }
 
 enum TaskCommand {
-    Spawn { id: u64, task: ExecutorTask },
+    Spawn { id: u64, task: BoxedExecutorTask },
     Cancel { id: u64 },
+}
+
+struct TaskCompletionGuard {
+    id: u64,
+    completion_sender: TaskCompletionSender,
+}
+
+impl Drop for TaskCompletionGuard {
+    fn drop(&mut self) {
+        let _ = self.completion_sender.send(self.id);
+    }
 }
 
 pub struct CurrentThreadExecutor {
     inner: CurrentThreadExecutorInner,
     task_sender: tokio::sync::mpsc::UnboundedSender<TaskCommand>,
+    runtime_handle: tokio::runtime::Handle,
     owner_thread: ThreadId,
     next_task_id: Arc<AtomicU64>,
 }
@@ -96,6 +102,7 @@ pub struct CurrentThreadExecutor {
 #[derive(Clone)]
 pub(crate) struct ExecutorHandle {
     task_sender: tokio::sync::mpsc::UnboundedSender<TaskCommand>,
+    runtime_handle: tokio::runtime::Handle,
     owner_thread: ThreadId,
     next_task_id: Arc<AtomicU64>,
 }
@@ -105,6 +112,7 @@ impl CurrentThreadExecutor {
         let mut builder = tokio::runtime::Builder::new_current_thread();
         builder.enable_all();
         let runtime = builder.build()?;
+        let runtime_handle = runtime.handle().clone();
         let (task_sender, task_receiver) = tokio::sync::mpsc::unbounded_channel();
         Ok(Self {
             inner: CurrentThreadExecutorInner::Runtime {
@@ -113,6 +121,7 @@ impl CurrentThreadExecutor {
                 task_receiver,
             },
             task_sender,
+            runtime_handle,
             owner_thread: thread::current().id(),
             next_task_id: Arc::new(AtomicU64::new(1)),
         })
@@ -121,6 +130,7 @@ impl CurrentThreadExecutor {
     pub(crate) fn handle(&self) -> ExecutorHandle {
         ExecutorHandle {
             task_sender: self.task_sender.clone(),
+            runtime_handle: self.runtime_handle.clone(),
             owner_thread: self.owner_thread,
             next_task_id: Arc::clone(&self.next_task_id),
         }
@@ -143,12 +153,8 @@ impl CurrentThreadExecutor {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        self.spawn_task(Box::pin(future))
-    }
-
-    pub(crate) fn spawn_task(&self, task: ExecutorTask) -> io::Result<TaskHandle> {
         let handle = match &self.inner {
-            CurrentThreadExecutorInner::Runtime { runtime, .. } => runtime.spawn(task),
+            CurrentThreadExecutorInner::Runtime { runtime, .. } => runtime.spawn(future),
         };
         Ok(TaskHandle {
             inner: TaskHandleInner::Local(handle),
@@ -163,20 +169,32 @@ impl CurrentThreadExecutor {
         } = self.inner;
         runtime.block_on(local_set.run_until(async move {
             let mut shutdown = shutdown;
+            let (completion_sender, mut completion_receiver) =
+                tokio::sync::mpsc::unbounded_channel();
             let mut task_handles = HashMap::new();
             loop {
                 tokio::select! {
                     _ = &mut shutdown => break,
+                    completed_id = completion_receiver.recv() => {
+                        let Some(completed_id) = completed_id else {
+                            break;
+                        };
+                        task_handles.remove(&completed_id);
+                    }
                     command = task_receiver.recv() => {
                         let Some(command) = command else {
                             break;
                         };
-                        task_handles.retain(|_, handle: &mut tokio::task::JoinHandle<()>| {
-                            !handle.is_finished()
-                        });
                         match command {
                             TaskCommand::Spawn { id, task } => {
-                                task_handles.insert(id, tokio::task::spawn_local(task));
+                                let completion_sender = completion_sender.clone();
+                                task_handles.insert(id, tokio::task::spawn_local(async move {
+                                    let _completion_guard = TaskCompletionGuard {
+                                        id,
+                                        completion_sender,
+                                    };
+                                    task().await;
+                                }));
                             }
                             TaskCommand::Cancel { id } => {
                                 if let Some(handle) = task_handles.remove(&id) {
@@ -195,13 +213,37 @@ impl CurrentThreadExecutor {
 }
 
 impl ExecutorHandle {
-    pub(crate) fn spawn_task(&self, task: ExecutorTask) -> io::Result<TaskHandle> {
+    pub(crate) fn spawn<F>(&self, future: F) -> io::Result<TaskHandle>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        Ok(TaskHandle {
+            inner: TaskHandleInner::Local(self.runtime_handle.spawn(future)),
+        })
+    }
+
+    pub(crate) fn local_spawn_task<F>(&self, future: F) -> io::Result<TaskHandle>
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        if thread::current().id() != self.owner_thread {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "local task must be spawned on the executor owner thread",
+            ));
+        }
+        spawn_local(future)
+    }
+
+    pub(crate) fn spawn_task<T>(&self, task: T) -> io::Result<TaskHandle>
+    where
+        T: FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+    {
         if thread::current().id() == self.owner_thread {
-            return Ok(TaskHandle {
-                inner: TaskHandleInner::Local(tokio::task::spawn_local(task)),
-            });
+            return self.local_spawn_task(task());
         }
         let id = self.next_task_id.fetch_add(1, Ordering::Relaxed);
+        let task = Box::new(task);
         self.task_sender
             .send(TaskCommand::Spawn { id, task })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "worker runtime stopped"))?;
@@ -212,19 +254,6 @@ impl ExecutorHandle {
             },
         })
     }
-}
-
-pub(crate) async fn submit_or_run_local<T, TaskFut, LocalFut>(
-    executor: &ExecutorHandle,
-    task: T,
-    _local: LocalFut,
-) -> io::Result<()>
-where
-    T: FnOnce() -> TaskFut + Send + 'static,
-    TaskFut: Future<Output = ()> + Send + 'static,
-    LocalFut: Future<Output = ()>,
-{
-    executor.spawn_task(executor_task(task)).map(|_| ())
 }
 
 pub fn tcp_listener_from_std(listener: StdTcpListener) -> io::Result<TcpListener> {
