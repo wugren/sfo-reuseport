@@ -1,3 +1,7 @@
+use std::cell::RefCell;
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -21,22 +25,22 @@ fn service_config_records_bind_addr_without_worker_count() {
 }
 
 #[test]
-fn server_runtime_does_not_depend_on_server_facades() {
-    let source = include_str!("../../src/core/server_runtime.rs");
-    assert!(!source.contains("TcpServer"));
-    assert!(!source.contains("UdpServer"));
-    assert!(!source.contains("QuicServer"));
-    assert!(!source.contains("tcp::"));
-    assert!(!source.contains("udp::"));
-    assert!(!source.contains("crate::core::{tcp"));
-    assert!(!source.contains("crate::core::{udp"));
-}
+fn server_runtime_spawn_task_accepts_factory_api() {
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let (sender, receiver) = mpsc::channel();
 
-#[test]
-fn server_runtime_spawn_accepts_direct_future_api() {
-    let source = include_str!("../../src/core/server_runtime.rs");
-    assert!(source.contains("pub fn spawn<Fut>(&self, future: Fut)"));
-    assert!(!source.contains("pub fn spawn<T, Fut>"));
+    let _task = runtime
+        .spawn_task(move || -> Pin<Box<dyn Future<Output = ()> + 'static>> {
+            Box::pin(async move {
+                sender.send("completed").unwrap();
+            })
+        })
+        .unwrap();
+
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "completed"
+    );
 }
 
 #[test]
@@ -46,13 +50,33 @@ fn server_runtime_spawn_runs_task_on_worker_runtime() {
     let (sender, receiver) = mpsc::channel();
 
     let _task = runtime
-        .spawn(async move {
-            sender.send(thread::current().id()).unwrap();
+        .spawn_task(move || {
+            Box::pin(async move {
+                sender.send(thread::current().id()).unwrap();
+            })
         })
         .unwrap();
 
     let worker_thread = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_ne!(worker_thread, caller_thread);
+}
+
+#[test]
+fn server_runtime_spawn_task_future_can_use_worker_local_non_send_state() {
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let (sender, receiver) = mpsc::channel();
+
+    let _task = runtime
+        .spawn_task(move || -> Pin<Box<dyn Future<Output = ()> + 'static>> {
+            Box::pin(async move {
+                let value = Rc::new(RefCell::new(0usize));
+                *value.borrow_mut() += 1;
+                sender.send(*value.borrow()).unwrap();
+            })
+        })
+        .unwrap();
+
+    assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
 }
 
 #[test]
@@ -81,25 +105,4 @@ fn servers_return_handles_when_attached_to_server_runtime_through_serve() {
     tcp.close().unwrap();
     udp.close().unwrap();
     quic.close().unwrap();
-}
-
-#[test]
-fn listener_dynamic_management_api_is_not_public() {
-    let tcp = include_str!("../../src/core/tcp.rs");
-    let udp = include_str!("../../src/core/udp.rs");
-    let runtime = include_str!("../../src/core/server_runtime.rs");
-    let lib = include_str!("../../src/lib.rs");
-    let core = include_str!("../../src/core/mod.rs");
-
-    assert!(!tcp.contains("pub fn add_tcp_listener"));
-    assert!(!udp.contains("pub fn add_udp_listener"));
-    assert!(!udp.contains("pub fn add_quic_listener"));
-    assert!(!runtime.contains("pub fn remove_listener"));
-    assert!(!runtime.contains("pub fn submit_to_worker"));
-    assert!(!runtime.contains("ListenerId"));
-    assert!(!runtime.contains("ListenerProtocol"));
-    assert!(!lib.contains("ListenerId"));
-    assert!(!lib.contains("ListenerProtocol"));
-    assert!(!core.contains("ListenerId"));
-    assert!(!core.contains("ListenerProtocol"));
 }

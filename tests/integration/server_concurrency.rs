@@ -381,6 +381,7 @@ fn tracked_entries() -> TrackedEntries {
         active: Arc::new(AtomicUsize::new(0)),
         max_active: Arc::new(AtomicUsize::new(0)),
         total: Arc::new(AtomicUsize::new(0)),
+        observed: Arc::new(AtomicUsize::new(0)),
         sender,
         receiver: Arc::new(std::sync::Mutex::new(receiver)),
     }
@@ -391,6 +392,7 @@ struct TrackedEntries {
     active: Arc<AtomicUsize>,
     max_active: Arc<AtomicUsize>,
     total: Arc<AtomicUsize>,
+    observed: Arc<AtomicUsize>,
     sender: mpsc::Sender<usize>,
     receiver: Arc<std::sync::Mutex<mpsc::Receiver<usize>>>,
 }
@@ -408,26 +410,34 @@ impl TrackedEntries {
     }
 
     fn wait_for_total(&self, expected: usize) {
-        while self.total.load(Ordering::SeqCst) < expected {
-            self.receiver
+        while self.observed.load(Ordering::SeqCst) < expected {
+            let total = self
+                .receiver
                 .lock()
                 .unwrap()
                 .recv_timeout(Duration::from_secs(2))
                 .unwrap();
+            self.observed.fetch_max(total, Ordering::SeqCst);
         }
         assert_eq!(self.max_active.load(Ordering::SeqCst), 1);
     }
 
     fn assert_no_new_entry(&self) {
-        match self
-            .receiver
-            .lock()
-            .unwrap()
-            .recv_timeout(Duration::from_millis(150))
-        {
-            Ok(total) => panic!("unexpected handler entry {total} while permit was held"),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(error) => panic!("entry channel closed unexpectedly: {error}"),
+        let baseline = self.observed.load(Ordering::SeqCst);
+        loop {
+            match self
+                .receiver
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_millis(150))
+            {
+                Ok(total) if total <= baseline => {
+                    self.observed.fetch_max(total, Ordering::SeqCst);
+                }
+                Ok(total) => panic!("unexpected handler entry {total} while permit was held"),
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(error) => panic!("entry channel closed unexpectedly: {error}"),
+            }
         }
         assert_eq!(self.max_active.load(Ordering::SeqCst), 1);
     }

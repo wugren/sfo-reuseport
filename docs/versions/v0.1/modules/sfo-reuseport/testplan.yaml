@@ -43,7 +43,7 @@ levels:
         change_ids: ["CHG-server-runtime", "CHG-worker-model"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: server-runtime-random-task
-        name: ServerRuntime 随机 worker task 投递接口
+        name: ServerRuntime 随机 worker task factory 投递接口
         change_ids: ["CHG-server-runtime-random-task"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: explicit-runtime-serve-api

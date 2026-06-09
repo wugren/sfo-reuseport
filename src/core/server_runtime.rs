@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -8,6 +7,8 @@ use std::thread;
 
 use crate::core::{Error, ServerRuntimeConfig, WorkerCount};
 use crate::runtime;
+
+type LocalTask = Pin<Box<dyn std::future::Future<Output = ()> + 'static>>;
 
 #[derive(Clone)]
 pub struct ServerRuntime {
@@ -43,12 +44,15 @@ impl ServerRuntime {
         })
     }
 
-    pub fn spawn<Fut>(&self, future: Fut) -> Result<runtime::TaskHandle, Error>
+    pub fn spawn_task<F, Fut>(&self, task: F) -> Result<runtime::TaskHandle, Error>
     where
-        Fut: Future<Output = ()> + Send + 'static,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static
     {
         let worker_id = self.random_worker_id()?;
-        self.submit_future_to_worker(worker_id, future)
+        self.submit_to_worker(worker_id, move || {
+            Box::pin(task())
+        })
     }
 
     pub(crate) fn worker_count(&self) -> usize {
@@ -61,7 +65,7 @@ impl ServerRuntime {
         task: T,
     ) -> Result<runtime::TaskHandle, Error>
     where
-        T: FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+        T: FnOnce() -> LocalTask + Send + 'static,
     {
         let worker = self.worker(worker_id)?;
         worker.submit(task).map_err(Error::from)
@@ -72,7 +76,7 @@ impl ServerRuntime {
         task: T,
     ) -> Result<runtime::TaskHandle, Error>
     where
-        T: FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+        T: FnOnce() -> LocalTask + Send + 'static,
     {
         executor.spawn_task(task).map_err(Error::from)
     }
@@ -87,18 +91,6 @@ impl ServerRuntime {
 
     pub(crate) fn active_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.inner.active)
-    }
-
-    fn submit_future_to_worker<Fut>(
-        &self,
-        worker_id: usize,
-        future: Fut,
-    ) -> Result<runtime::TaskHandle, Error>
-    where
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        let worker = self.worker(worker_id)?;
-        worker.submit_future(future).map_err(Error::from)
     }
 
     fn random_worker_id(&self) -> Result<usize, Error> {
@@ -137,16 +129,9 @@ struct WorkerHandle {
 impl WorkerHandle {
     fn submit<T>(&self, task: T) -> io::Result<runtime::TaskHandle>
     where
-        T: FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
+        T: FnOnce() -> LocalTask + Send + 'static,
     {
         self.executor.spawn_task(task)
-    }
-
-    fn submit_future<Fut>(&self, future: Fut) -> io::Result<runtime::TaskHandle>
-    where
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        self.executor.spawn(future)
     }
 }
 
@@ -193,7 +178,7 @@ mod tests {
 
         runtime.inner.active.store(false, Ordering::SeqCst);
 
-        let result = runtime.spawn(async {});
+        let result = runtime.spawn_task(|| Box::pin(async {}));
         assert!(matches!(
             result,
             Err(Error::Runtime(message)) if message == "server runtime is stopped"

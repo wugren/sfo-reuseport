@@ -94,7 +94,6 @@ impl Drop for TaskCompletionGuard {
 pub struct CurrentThreadExecutor {
     inner: CurrentThreadExecutorInner,
     task_sender: tokio::sync::mpsc::UnboundedSender<TaskCommand>,
-    runtime_handle: tokio::runtime::Handle,
     owner_thread: ThreadId,
     next_task_id: Arc<AtomicU64>,
 }
@@ -102,7 +101,6 @@ pub struct CurrentThreadExecutor {
 #[derive(Clone)]
 pub(crate) struct ExecutorHandle {
     task_sender: tokio::sync::mpsc::UnboundedSender<TaskCommand>,
-    runtime_handle: tokio::runtime::Handle,
     owner_thread: ThreadId,
     next_task_id: Arc<AtomicU64>,
 }
@@ -112,7 +110,6 @@ impl CurrentThreadExecutor {
         let mut builder = tokio::runtime::Builder::new_current_thread();
         builder.enable_all();
         let runtime = builder.build()?;
-        let runtime_handle = runtime.handle().clone();
         let (task_sender, task_receiver) = tokio::sync::mpsc::unbounded_channel();
         Ok(Self {
             inner: CurrentThreadExecutorInner::Runtime {
@@ -121,7 +118,6 @@ impl CurrentThreadExecutor {
                 task_receiver,
             },
             task_sender,
-            runtime_handle,
             owner_thread: thread::current().id(),
             next_task_id: Arc::new(AtomicU64::new(1)),
         })
@@ -130,7 +126,6 @@ impl CurrentThreadExecutor {
     pub(crate) fn handle(&self) -> ExecutorHandle {
         ExecutorHandle {
             task_sender: self.task_sender.clone(),
-            runtime_handle: self.runtime_handle.clone(),
             owner_thread: self.owner_thread,
             next_task_id: Arc::clone(&self.next_task_id),
         }
@@ -213,16 +208,7 @@ impl CurrentThreadExecutor {
 }
 
 impl ExecutorHandle {
-    pub(crate) fn spawn<F>(&self, future: F) -> io::Result<TaskHandle>
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        Ok(TaskHandle {
-            inner: TaskHandleInner::Local(self.runtime_handle.spawn(future)),
-        })
-    }
-
-    pub(crate) fn local_spawn_task<F>(&self, future: F) -> io::Result<TaskHandle>
+    pub(crate) fn spawn_local_task<F>(&self, future: F) -> io::Result<TaskHandle>
     where
         F: Future<Output = ()> + 'static,
     {
@@ -240,7 +226,7 @@ impl ExecutorHandle {
         T: FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
     {
         if thread::current().id() == self.owner_thread {
-            return self.local_spawn_task(task());
+            return self.spawn_local_task(task());
         }
         let id = self.next_task_id.fetch_add(1, Ordering::Relaxed);
         let task = Box::new(task);
