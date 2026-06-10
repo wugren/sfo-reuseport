@@ -66,6 +66,10 @@ levels:
         name: TCP UDP 常规 handler future 支持 Rc RefCell 且不要求 Send
         change_ids: ["CHG-serve-local-handlers", "CHG-tcp-serve", "CHG-udp-runtime-socket"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
+      - id: worker-local-state-api
+        name: TCP UDP QUIC serve_with_state 接受用户自定义可写非 Send state
+        change_ids: ["CHG-worker-local-state", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "unit"]
       - id: udp-runtime-socket-api
         name: UDP handler 和 server listener 统一 UdpSocket API 契约
         change_ids: ["CHG-udp-runtime-socket", "CHG-dynamic-listeners", "CHG-quic-routed-udp"]
@@ -232,6 +236,10 @@ levels:
       - id: server-concurrency-limit
         name: TCP UDP QUIC 每 worker handler 并发上限、native 等待、模拟路径满载丢弃、释放和 permit helper 单 waiter 模型
         change_ids: ["CHG-server-concurrency-limit", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp", "CHG-worker-thread-runtime"]
+        run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
+      - id: worker-local-state-serve
+        name: TCP UDP QUIC serve_with_state 每 worker state 复用、可写和关闭释放
+        change_ids: ["CHG-worker-local-state", "CHG-tcp-serve", "CHG-udp-runtime-socket", "CHG-quic-routed-udp", "CHG-worker-thread-runtime"]
         run: ["python3", "./harness/scripts/test-run.py", "sfo-reuseport", "integration"]
       - id: platform-os-matrix
         name: Linux macOS FreeBSD Windows 平台矩阵验证

@@ -8,3 +8,5 @@ mod server_concurrency;
 mod tcp_serve;
 #[path = "integration/udp_serve.rs"]
 mod udp_serve;
+#[path = "integration/worker_local_state.rs"]
+mod worker_local_state;

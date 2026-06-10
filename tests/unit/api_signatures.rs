@@ -39,6 +39,22 @@ where
 {
 }
 
+fn assert_tcp_state_handler<S, F, Fut>(_handler: F)
+where
+    S: Clone + 'static,
+    F: Clone + Send + Sync + 'static + Fn(S, TcpStream) -> Fut,
+    Fut: Future<Output = Result<(), Error>> + 'static,
+{
+}
+
+fn assert_udp_state_handler<S, F, Fut>(_handler: F)
+where
+    S: Clone + 'static,
+    F: Clone + Send + Sync + 'static + Fn(S, UdpSocket, PacketMeta, Vec<u8>) -> Fut,
+    Fut: Future<Output = Result<(), Error>> + 'static,
+{
+}
+
 #[test]
 fn regular_callback_signatures_do_not_include_worker_id() {
     assert_tcp_handler(|_stream| async { Ok(()) });
@@ -78,6 +94,18 @@ fn socket_only_and_quic_handlers_allow_non_send_futures() {
             *count.borrow_mut() += 1;
             Ok(())
         }
+    });
+}
+
+#[test]
+fn stateful_handlers_accept_user_defined_mutable_non_send_state() {
+    assert_tcp_state_handler(|state: Rc<RefCell<usize>>, _stream| async move {
+        *state.borrow_mut() += 1;
+        Ok(())
+    });
+    assert_udp_state_handler(|state: Rc<RefCell<usize>>, _socket, _meta, _payload| async move {
+        *state.borrow_mut() += 1;
+        Ok(())
     });
 }
 
@@ -135,6 +163,42 @@ fn server_entrypoints_are_public() {
     assert_eq!(quic_rx.recv_timeout(Duration::from_secs(2)).unwrap().1, 0);
     udp_socket.close().unwrap();
     quic_socket.close().unwrap();
+}
+
+#[test]
+fn stateful_server_entrypoints_are_public() {
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let tcp: Result<TcpServer, Error> = TcpServer::serve_with_state(
+        &runtime,
+        TcpServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        || Rc::new(RefCell::new(0_usize)),
+        |state, _stream| async move {
+            *state.borrow_mut() += 1;
+            Ok(())
+        },
+    );
+    let udp: Result<UdpServer, Error> = UdpServer::serve_with_state(
+        &runtime,
+        UdpServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        || Rc::new(RefCell::new(0_usize)),
+        |state, _socket, _meta, _payload| async move {
+            *state.borrow_mut() += 1;
+            Ok(())
+        },
+    );
+    let quic: Result<QuicServer, Error> = QuicServer::serve_with_state(
+        &runtime,
+        UdpServiceConfig::new("127.0.0.1:0".parse().unwrap()),
+        || Rc::new(RefCell::new(0_usize)),
+        |state, _socket, _meta, _payload| async move {
+            *state.borrow_mut() += 1;
+            Ok(())
+        },
+    );
+
+    tcp.unwrap().close().unwrap();
+    udp.unwrap().close().unwrap();
+    quic.unwrap().close().unwrap();
 }
 
 #[test]

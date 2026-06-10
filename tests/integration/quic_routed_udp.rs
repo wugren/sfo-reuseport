@@ -1,8 +1,10 @@
+use std::cell::RefCell;
 use std::net::UdpSocket as StdUdpSocket;
 #[cfg(feature = "quinn")]
 use std::fmt;
 #[cfg(feature = "quinn")]
 use std::pin::Pin;
+use std::rc::Rc;
 #[cfg(feature = "quinn")]
 use std::task::{Context, Poll};
 use std::sync::{Arc, Mutex, Once};
@@ -113,6 +115,46 @@ async fn quic_routed_udp_delivers_long_header_dcid_to_target_worker() {
 
     server.close().unwrap();
     panic!("quic routed udp handler did not record a worker");
+}
+
+#[tokio::test]
+async fn quic_serve_with_state_reuses_mutable_worker_state() {
+    disable_quic_bpf_for_test();
+    let _guard = QUIC_TEST_LOCK.lock().unwrap();
+    let addr = free_addr();
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let server = QuicServer::serve_with_state(
+        &runtime,
+        UdpServiceConfig::new(addr),
+        || Rc::new(RefCell::new(0_usize)),
+        move |state, socket, meta, _payload| async move {
+            let hit = {
+                let mut hits = state.borrow_mut();
+                *hits += 1;
+                *hits
+            };
+            socket.send_to(hit.to_string().as_bytes(), meta.peer_addr.unwrap()).await?;
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let packet = [0xe0, 0, 0, 0, 1, 4, 0, 0, 9, 9];
+    let mut buffer = [0_u8; 16];
+    client.send_to(&packet, addr).await.unwrap();
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buffer[..len], b"1");
+    client.send_to(&packet, addr).await.unwrap();
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buffer[..len], b"2");
+    server.close().unwrap();
 }
 
 #[tokio::test]

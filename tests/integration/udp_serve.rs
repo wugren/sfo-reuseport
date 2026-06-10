@@ -1,6 +1,8 @@
+use std::cell::RefCell;
 use std::net::UdpSocket as StdUdpSocket;
 #[cfg(feature = "quinn")]
 use std::future::poll_fn;
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -35,6 +37,63 @@ async fn udp_loopback_serve_receives_packet_and_sends_response() {
     let mut buffer = [0_u8; 16];
     let (len, _) = client.recv_from(&mut buffer).await.unwrap();
     assert_eq!(&buffer[..len], b"pong");
+    server.abort();
+}
+
+#[tokio::test]
+async fn udp_serve_with_state_reuses_mutable_worker_state() {
+    let addr = free_addr();
+    let (hit_tx, mut hit_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1))?;
+        UdpServer::serve_with_state(
+            &runtime,
+            UdpServiceConfig::new(addr),
+            || Rc::new(RefCell::new(0_usize)),
+            move |state, socket, meta, _payload| {
+                let hit_tx = hit_tx.clone();
+                async move {
+                    let hit = {
+                        let mut hits = state.borrow_mut();
+                        *hits += 1;
+                        *hits
+                    };
+                    hit_tx.send(hit).unwrap();
+                    socket.send_to(hit.to_string().as_bytes(), meta.peer_addr.unwrap()).await?;
+                    Ok(())
+                }
+            },
+        )?;
+        std::future::pending::<Result<(), Error>>().await
+    });
+
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut buffer = [0_u8; 16];
+    client.send_to(b"first", addr).await.unwrap();
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buffer[..len], b"1");
+    client.send_to(b"second", addr).await.unwrap();
+    let (len, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buffer[..len], b"2");
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), hit_rx.recv())
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), hit_rx.recv())
+            .await
+            .unwrap(),
+        Some(2)
+    );
     server.abort();
 }
 

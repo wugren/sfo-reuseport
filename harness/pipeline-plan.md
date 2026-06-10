@@ -7,7 +7,7 @@
 - Auto-confirm completed document stages: yes
 - Version: v0.1
 - Module(s): sfo-reuseport
-- change_id values: CHG-server-runtime, CHG-tcp-serve, CHG-udp-runtime-socket, CHG-quic-routed-udp, CHG-tokio-uring-runtime, CHG-publish-metadata, CHG-quinn-udp-socket-compat, CHG-udp-quic-listener-serve, CHG-worker-model, CHG-server-concurrency-limit
+- change_id values: CHG-server-runtime, CHG-tcp-serve, CHG-udp-runtime-socket, CHG-quic-routed-udp, CHG-tokio-uring-runtime, CHG-publish-metadata, CHG-quinn-udp-socket-compat, CHG-udp-quic-listener-serve, CHG-worker-model, CHG-server-concurrency-limit, CHG-worker-local-state
 
 ## Acceptance Baseline
 - Final acceptance is judged against:
@@ -141,6 +141,11 @@
 | I-26 | implementation | complete | implement ServerRuntime worker-local task factory submission | production code for `CHG-server-runtime-random-task` | root | D-26, admission-check passed | production code | cargo check passed; implementation stage-scope blocked by aggregate pipeline baseline |
 | T-26 | testing | confirmed | verify ServerRuntime factory submission API and non-Send worker-local future behavior | tests and testing docs | root | I-26 | tests, `testing.md`, `testplan.yaml` | `sfo-reuseport all` and `all all` passed; stage-scope blocked by aggregate pipeline baseline |
 | A-26 | acceptance | complete | audit ServerRuntime task factory submission evidence chain | final acceptance for factory task submission | root | T-26 | `docs/versions/v0.1/reviews/sfo-reuseport-v0.1-server-runtime-task-factory-acceptance.md` | accepted by behavior; strict process caveat is aggregate stage-scope baseline |
+| P-27 | proposal | confirmed | require TCP/UDP/QUIC worker-local mutable state for regular handlers | `CHG-worker-local-state` proposal baseline | root | user confirmation and auto-pipeline continuation | `proposal.md` | proposal auto-confirmed; schema-check passed; stage-scope blocked by pre-existing untracked review/script files |
+| D-27 | design | confirmed | define worker-local state API, bounds, lifecycle, and dispatch flow | `TcpServer`/`UdpServer`/`QuicServer` regular handler state design | root | P-27 | `design.md` | design maps `CHG-worker-local-state`; schema/admission checks pass; stage-scope blocked by aggregate pipeline baseline |
+| I-27 | implementation | complete | implement worker-local state serve entrypoints and dispatch reuse | production code for `CHG-worker-local-state` | root | D-27, admission-check passed | production code | implementation complete; `cargo check --lib` passed; no testing artifacts changed in implementation stage |
+| T-27 | testing | confirmed | verify worker-local state API, reuse, mutability, and drop lifecycle | tests, `testing.md`, `testplan.yaml` | root | I-27 | tests and testing docs | schema-check passed; focused unit/integration passed; canonical unit passed; canonical integration passed default and quinn feature |
+| A-27 | acceptance | complete | audit worker-local state evidence chain | worker-local state final acceptance | root | T-27 | `docs/versions/v0.1/reviews/sfo-reuseport-v0.1-worker-local-state-acceptance.md` | accepted by behavior; schema/admission/unit/integration/all passed; strict stage-scope caveat is aggregate pipeline baseline and pre-existing untracked files |
 
 ## Submodule Tasks
 | Task ID | Stage | Status | Responsibility | Submodule | Parent Task | Depends On | Output | Done Condition |
@@ -158,10 +163,10 @@
   - return to implementation task
 
 ## Exit Condition
-- [x] All blocking issues closed
-- [x] Required evidence exists
-- [x] Document-producing stages auto-confirmed by setting front matter to `status: approved`, `approved_by: auto-pipeline`, and `approved_at`
-- [x] Every implemented `change_id` has proposal/design traceability plus post-implementation testing evidence or explicit gap
+- [ ] All blocking issues closed
+- [ ] Required evidence exists
+- [ ] Document-producing stages auto-confirmed by setting front matter to `status: approved`, `approved_by: auto-pipeline`, and `approved_at`
+- [ ] Every implemented `change_id` has proposal/design traceability plus post-implementation testing evidence or explicit gap
 - [ ] Every single-stage task passed stage-scope-check
-- [x] Final behavioral acceptance passed against `proposal.md`
+- [ ] Final behavioral acceptance passed against `proposal.md`
 - [ ] Strict final process acceptance passed without stage-scope baseline blockers
