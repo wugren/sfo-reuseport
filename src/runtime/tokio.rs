@@ -212,26 +212,10 @@ impl ExecutorHandle {
         thread::current().id() == self.owner_thread
     }
 
-    pub(crate) fn spawn_local_task<F>(&self, future: F) -> io::Result<TaskHandle>
-    where
-        F: Future<Output = ()> + 'static,
-    {
-        if !self.is_owner_thread() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "local task must be spawned on the executor owner thread",
-            ));
-        }
-        spawn_local(future)
-    }
-
     pub(crate) fn spawn_task<T>(&self, task: T) -> io::Result<TaskHandle>
     where
         T: FnOnce() -> Pin<Box<dyn Future<Output = ()> + 'static>> + Send + 'static,
     {
-        if self.is_owner_thread() {
-            return self.spawn_local_task(task());
-        }
         let id = self.next_task_id.fetch_add(1, Ordering::Relaxed);
         let task = Box::new(task);
         self.task_sender
