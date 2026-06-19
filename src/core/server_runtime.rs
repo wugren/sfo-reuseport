@@ -47,12 +47,15 @@ impl ServerRuntime {
     pub fn spawn_task<F, Fut>(&self, task: F) -> Result<runtime::TaskHandle, Error>
     where
         F: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = ()> + 'static
+        Fut: Future<Output = ()> + 'static,
     {
+        self.ensure_running()?;
+        if let Some(worker_id) = self.current_worker_id() {
+            return self.submit_to_worker(worker_id, move || Box::pin(task()));
+        }
+
         let worker_id = self.random_worker_id()?;
-        self.submit_to_worker(worker_id, move || {
-            Box::pin(task())
-        })
+        self.submit_to_worker(worker_id, move || Box::pin(task()))
     }
 
     pub(crate) fn worker_count(&self) -> usize {
@@ -94,9 +97,7 @@ impl ServerRuntime {
     }
 
     fn random_worker_id(&self) -> Result<usize, Error> {
-        if !self.inner.active.load(Ordering::SeqCst) {
-            return Err(Error::Runtime("server runtime is stopped".to_string()));
-        }
+        self.ensure_running()?;
         let worker_count = self.worker_count();
         if worker_count == 0 {
             return Err(Error::Runtime(
@@ -111,6 +112,21 @@ impl ServerRuntime {
             .workers
             .get(worker_id)
             .ok_or_else(|| Error::InvalidConfig("worker index is out of range".to_string()))
+    }
+
+    fn ensure_running(&self) -> Result<(), Error> {
+        if self.inner.active.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(Error::Runtime("server runtime is stopped".to_string()))
+        }
+    }
+
+    fn current_worker_id(&self) -> Option<usize> {
+        self.inner
+            .workers
+            .iter()
+            .position(|worker| worker.is_owner_thread())
     }
 }
 
@@ -132,6 +148,10 @@ impl WorkerHandle {
         T: FnOnce() -> LocalTask + Send + 'static,
     {
         self.executor.spawn_task(task)
+    }
+
+    fn is_owner_thread(&self) -> bool {
+        self.executor.is_owner_thread()
     }
 }
 

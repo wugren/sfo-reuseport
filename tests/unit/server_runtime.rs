@@ -62,6 +62,37 @@ fn server_runtime_spawn_runs_task_on_worker_runtime() {
 }
 
 #[test]
+fn server_runtime_spawn_task_from_worker_thread_spawns_locally() {
+    let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
+    let runtime_from_worker = runtime.clone();
+    let caller_thread = thread::current().id();
+    let (sender, receiver) = mpsc::channel();
+
+    let _outer_task = runtime
+        .spawn_task(move || {
+            Box::pin(async move {
+                let outer_worker_thread = thread::current().id();
+                let sender = sender.clone();
+                let _inner_task = runtime_from_worker
+                    .spawn_task(move || {
+                        Box::pin(async move {
+                            sender
+                                .send((outer_worker_thread, thread::current().id()))
+                                .unwrap();
+                        })
+                    })
+                    .unwrap();
+            })
+        })
+        .unwrap();
+
+    let (outer_worker_thread, inner_worker_thread) =
+        receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_ne!(outer_worker_thread, caller_thread);
+    assert_eq!(inner_worker_thread, outer_worker_thread);
+}
+
+#[test]
 fn server_runtime_spawn_task_future_can_use_worker_local_non_send_state() {
     let runtime = ServerRuntime::start(ServerRuntimeConfig::new().with_workers(1)).unwrap();
     let (sender, receiver) = mpsc::channel();

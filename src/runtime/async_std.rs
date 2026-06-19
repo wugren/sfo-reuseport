@@ -125,7 +125,7 @@ impl CurrentThreadExecutor {
         T: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ()> + 'static,
     {
-        if thread::current().id() == self.owner_thread {
+        if self.is_owner_thread() {
             return self.local_spawn_task(task());
         }
         let executor = self.clone();
@@ -138,7 +138,7 @@ impl CurrentThreadExecutor {
     where
         F: Future<Output = ()> + 'static,
     {
-        if thread::current().id() != self.owner_thread {
+        if !self.is_owner_thread() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "local task must be spawned on the executor owner thread",
@@ -153,6 +153,10 @@ impl CurrentThreadExecutor {
         self.block_on(async move {
             let _ = shutdown.recv().await;
         });
+    }
+
+    pub(crate) fn is_owner_thread(&self) -> bool {
+        thread::current().id() == self.owner_thread
     }
 }
 
