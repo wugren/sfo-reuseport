@@ -10,7 +10,11 @@ use std::net::{
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(feature = "quinn")]
+use std::task::{Context, Poll};
 use std::thread::{self, ThreadId};
+#[cfg(feature = "quinn")]
+use tokio::io::ReadBuf;
 
 pub type TcpListener = tokio::net::TcpListener;
 pub type TcpStream = tokio::net::TcpStream;
@@ -290,26 +294,30 @@ pub fn udp_poll_send_ready(
 #[cfg(feature = "quinn")]
 pub fn udp_poll_recv_from_slice(
     socket: &UdpSocket,
-    cx: &mut std::task::Context<'_>,
+    cx: &mut Context<'_>,
     buffer: &mut [u8],
-) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
-    let mut future = Box::pin(socket.recv_from(buffer));
-    future.as_mut().poll(cx)
+) -> Poll<io::Result<(usize, SocketAddr)>> {
+    let mut read_buf = ReadBuf::new(buffer);
+    let addr = match socket.poll_recv_from(cx, &mut read_buf) {
+        Poll::Ready(result) => result?,
+        Poll::Pending => return Poll::Pending,
+    };
+    Poll::Ready(Ok((read_buf.filled().len(), addr)))
 }
 
 #[cfg(feature = "quinn")]
 pub fn udp_poll_recv_from_vectored(
     socket: &UdpSocket,
-    cx: &mut std::task::Context<'_>,
+    cx: &mut Context<'_>,
     buffers: &mut [IoSliceMut<'_>],
-) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
+) -> Poll<io::Result<(usize, SocketAddr)>> {
     let mut buffer = vec![0_u8; 65_536];
     match udp_poll_recv_from_slice(socket, cx, &mut buffer) {
-        std::task::Poll::Pending => std::task::Poll::Pending,
-        std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
-        std::task::Poll::Ready(Ok((len, peer_addr))) => {
+        Poll::Pending => Poll::Pending,
+        Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+        Poll::Ready(Ok((len, peer_addr))) => {
             scatter_datagram(&buffer[..len], buffers);
-            std::task::Poll::Ready(Ok((len, peer_addr)))
+            Poll::Ready(Ok((len, peer_addr)))
         }
     }
 }

@@ -221,40 +221,24 @@ pub fn udp_poll_send_ready(
 
 #[cfg(feature = "quinn")]
 pub fn udp_poll_recv_from_slice(
-    socket: &UdpSocket,
-    cx: &mut std::task::Context<'_>,
-    buffer: &mut [u8],
+    _socket: &UdpSocket,
+    _cx: &mut std::task::Context<'_>,
+    _buffer: &mut [u8],
 ) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
-    let mut future = Box::pin(socket.recv_from(buffer));
-    future.as_mut().poll(cx)
+    std::task::Poll::Ready(Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "async-std UDP socket does not expose poll-based recv readiness",
+    )))
 }
 
 #[cfg(feature = "quinn")]
 pub fn udp_poll_recv_from_vectored(
-    socket: &UdpSocket,
-    cx: &mut std::task::Context<'_>,
-    buffers: &mut [IoSliceMut<'_>],
+    _socket: &UdpSocket,
+    _cx: &mut std::task::Context<'_>,
+    _buffers: &mut [IoSliceMut<'_>],
 ) -> std::task::Poll<io::Result<(usize, SocketAddr)>> {
-    let mut buffer = vec![0_u8; 65_536];
-    match udp_poll_recv_from_slice(socket, cx, &mut buffer) {
-        std::task::Poll::Pending => std::task::Poll::Pending,
-        std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
-        std::task::Poll::Ready(Ok((len, peer_addr))) => {
-            scatter_datagram(&buffer[..len], buffers);
-            std::task::Poll::Ready(Ok((len, peer_addr)))
-        }
-    }
-}
-
-#[cfg(feature = "quinn")]
-fn scatter_datagram(payload: &[u8], buffers: &mut [IoSliceMut<'_>]) {
-    let mut offset = 0;
-    for buffer in buffers {
-        if offset >= payload.len() {
-            break;
-        }
-        let copy_len = (payload.len() - offset).min(buffer.len());
-        buffer[..copy_len].copy_from_slice(&payload[offset..offset + copy_len]);
-        offset += copy_len;
-    }
+    std::task::Poll::Ready(Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "async-std UDP socket does not expose poll-based recv readiness",
+    )))
 }
